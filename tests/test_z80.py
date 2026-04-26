@@ -1134,3 +1134,503 @@ class TestALU8:
         assert cpu.A == 0xFF
         assert flag(cpu, 'C')
         assert flag(cpu, 'S')
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — Rotates, shifts, and CB prefix
+# ---------------------------------------------------------------------------
+
+class TestRotates:
+    """RLCA / RRCA / RLA / RRA — accumulator rotates (4 cycles each)."""
+
+    # -----------------------------------------------------------------------
+    # RLCA  (0x07) — rotate A left, bit 7 → C and bit 0; S/Z/PV preserved
+    # -----------------------------------------------------------------------
+
+    def test_rlca_carry_out(self):
+        cpu = make_cpu()
+        cpu.A = 0b10110100          # bit 7 = 1
+        load_prog(cpu, [0x07])
+        cycles = cpu.step()
+        assert cpu.A == 0b01101001
+        assert flag(cpu, 'C')
+        assert cycles == 4
+
+    def test_rlca_no_carry(self):
+        cpu = make_cpu()
+        cpu.A = 0b01001000
+        load_prog(cpu, [0x07])
+        cpu.step()
+        assert cpu.A == 0b10010000
+        assert not flag(cpu, 'C')
+
+    def test_rlca_preserves_szpv(self):
+        cpu = make_cpu()
+        cpu.A = 0x01
+        set_flags(cpu, S=True, Z=True, PV=True)
+        load_prog(cpu, [0x07])
+        cpu.step()
+        assert flag(cpu, 'S')
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'PV')
+
+    def test_rlca_clears_h_and_n(self):
+        cpu = make_cpu()
+        cpu.A = 0x01
+        set_flags(cpu, H=True, N=True)
+        load_prog(cpu, [0x07])
+        cpu.step()
+        assert not flag(cpu, 'H')
+        assert not flag(cpu, 'N')
+
+    # -----------------------------------------------------------------------
+    # RRCA  (0x0F) — rotate A right, bit 0 → C and bit 7; S/Z/PV preserved
+    # -----------------------------------------------------------------------
+
+    def test_rrca_carry_out(self):
+        cpu = make_cpu()
+        cpu.A = 0b10110101          # bit 0 = 1
+        load_prog(cpu, [0x0F])
+        cpu.step()
+        assert cpu.A == 0b11011010
+        assert flag(cpu, 'C')
+
+    def test_rrca_no_carry(self):
+        cpu = make_cpu()
+        cpu.A = 0b10110100
+        load_prog(cpu, [0x0F])
+        cpu.step()
+        assert cpu.A == 0b01011010
+        assert not flag(cpu, 'C')
+
+    def test_rrca_preserves_szpv(self):
+        cpu = make_cpu()
+        cpu.A = 0x02
+        set_flags(cpu, S=True, Z=True, PV=True)
+        load_prog(cpu, [0x0F])
+        cpu.step()
+        assert flag(cpu, 'S')
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'PV')
+
+    # -----------------------------------------------------------------------
+    # RLA  (0x17) — rotate A left through carry; S/Z/PV preserved
+    # -----------------------------------------------------------------------
+
+    def test_rla_bit7_into_carry(self):
+        cpu = make_cpu()
+        cpu.A = 0b10000000
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0x17])
+        cpu.step()
+        assert cpu.A == 0b00000000
+        assert flag(cpu, 'C')           # old bit 7 → C
+
+    def test_rla_carry_into_bit0(self):
+        cpu = make_cpu()
+        cpu.A = 0b00000000
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0x17])
+        cpu.step()
+        assert cpu.A == 0b00000001      # old C → bit 0
+        assert not flag(cpu, 'C')
+
+    def test_rla_both_set(self):
+        cpu = make_cpu()
+        cpu.A = 0b10110100
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0x17])
+        cpu.step()
+        assert cpu.A == 0b01101001
+        assert flag(cpu, 'C')
+
+    def test_rla_preserves_szpv(self):
+        cpu = make_cpu()
+        cpu.A = 0x01
+        set_flags(cpu, S=True, Z=True, PV=True, C=False)
+        load_prog(cpu, [0x17])
+        cpu.step()
+        assert flag(cpu, 'S')
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'PV')
+
+    # -----------------------------------------------------------------------
+    # RRA  (0x1F) — rotate A right through carry; S/Z/PV preserved
+    # -----------------------------------------------------------------------
+
+    def test_rra_bit0_into_carry(self):
+        cpu = make_cpu()
+        cpu.A = 0b00000001
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0x1F])
+        cpu.step()
+        assert cpu.A == 0b00000000
+        assert flag(cpu, 'C')           # old bit 0 → C
+
+    def test_rra_carry_into_bit7(self):
+        cpu = make_cpu()
+        cpu.A = 0b00000000
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0x1F])
+        cpu.step()
+        assert cpu.A == 0b10000000      # old C → bit 7
+        assert not flag(cpu, 'C')
+
+    def test_rra_clears_h_and_n(self):
+        cpu = make_cpu()
+        cpu.A = 0x10
+        set_flags(cpu, H=True, N=True, C=False)
+        load_prog(cpu, [0x1F])
+        cpu.step()
+        assert not flag(cpu, 'H')
+        assert not flag(cpu, 'N')
+
+
+class TestCB:
+    """CB-prefix instructions: rotate/shift, BIT, RES, SET."""
+
+    # -----------------------------------------------------------------------
+    # CB RLC  (0xCB 0x00–0x07) — sets S/Z/PV from result (unlike RLCA)
+    # -----------------------------------------------------------------------
+
+    def test_rlc_b_carry_and_wrap(self):
+        cpu = make_cpu()
+        cpu.B = 0b10000001
+        load_prog(cpu, [0xCB, 0x00])    # RLC B
+        cycles = cpu.step()
+        assert cpu.B == 0b00000011
+        assert flag(cpu, 'C')
+        assert cycles == 8
+
+    def test_rlc_sets_szpv_from_result(self):
+        # Distinguish from RLCA: S/Z/PV reflect the new value
+        cpu = make_cpu()
+        cpu.B = 0b11000000              # result = 0b10000001 → S=1
+        set_flags(cpu, S=False, Z=True, PV=False)
+        load_prog(cpu, [0xCB, 0x00])
+        cpu.step()
+        assert flag(cpu, 'S')
+        assert not flag(cpu, 'Z')
+
+    def test_rlc_zero_result(self):
+        cpu = make_cpu()
+        cpu.B = 0x00
+        load_prog(cpu, [0xCB, 0x00])
+        cpu.step()
+        assert cpu.B == 0x00
+        assert flag(cpu, 'Z')
+        assert not flag(cpu, 'C')
+
+    def test_rlc_hl_mem(self):
+        # RLC (HL): 15 cycles, writes back to memory
+        cpu = make_cpu()
+        cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0b00010001
+        load_prog(cpu, [0xCB, 0x06])    # RLC (HL)
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC000] == 0b00100010
+        assert not flag(cpu, 'C')
+        assert cycles == 15
+
+    # -----------------------------------------------------------------------
+    # CB RRC  (0xCB 0x08–0x0F)
+    # -----------------------------------------------------------------------
+
+    def test_rrc_a(self):
+        cpu = make_cpu()
+        cpu.A = 0b00000001
+        load_prog(cpu, [0xCB, 0x0F])    # RRC A
+        cpu.step()
+        assert cpu.A == 0b10000000
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'S')
+
+    def test_rrc_no_carry(self):
+        cpu = make_cpu()
+        cpu.C = 0b10000000
+        load_prog(cpu, [0xCB, 0x09])    # RRC C
+        cpu.step()
+        assert cpu.C == 0b01000000
+        assert not flag(cpu, 'C')
+
+    # -----------------------------------------------------------------------
+    # CB RL  (0xCB 0x10–0x17) — rotate left through carry
+    # -----------------------------------------------------------------------
+
+    def test_rl_c_through_carry(self):
+        cpu = make_cpu()
+        cpu.C = 0b10000000
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xCB, 0x11])    # RL C
+        cycles = cpu.step()
+        assert cpu.C == 0b00000001      # old C in at bit 0
+        assert flag(cpu, 'C')           # old bit 7 out
+        assert cycles == 8
+
+    def test_rl_clears_carry(self):
+        cpu = make_cpu()
+        cpu.D = 0b01000000
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xCB, 0x12])    # RL D
+        cpu.step()
+        assert cpu.D == 0b10000000
+        assert not flag(cpu, 'C')
+
+    # -----------------------------------------------------------------------
+    # CB RR  (0xCB 0x18–0x1F) — rotate right through carry
+    # -----------------------------------------------------------------------
+
+    def test_rr_d(self):
+        cpu = make_cpu()
+        cpu.D = 0b00000001
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xCB, 0x1A])    # RR D
+        cpu.step()
+        assert cpu.D == 0b00000000
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'Z')
+
+    def test_rr_carry_in(self):
+        cpu = make_cpu()
+        cpu.E = 0b00000000
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xCB, 0x1B])    # RR E
+        cpu.step()
+        assert cpu.E == 0b10000000
+        assert not flag(cpu, 'C')
+
+    # -----------------------------------------------------------------------
+    # CB SLA  (0xCB 0x20–0x27) — shift left, bit 0 ← 0
+    # -----------------------------------------------------------------------
+
+    def test_sla_e(self):
+        cpu = make_cpu()
+        cpu.E = 0b10110101
+        load_prog(cpu, [0xCB, 0x23])    # SLA E
+        cycles = cpu.step()
+        assert cpu.E == 0b01101010      # bit 0 = 0
+        assert flag(cpu, 'C')           # old bit 7
+        assert cycles == 8
+
+    def test_sla_zero_fill(self):
+        # SLA always puts 0 in bit 0
+        cpu = make_cpu()
+        cpu.B = 0b11111111
+        load_prog(cpu, [0xCB, 0x20])
+        cpu.step()
+        assert cpu.B == 0b11111110
+        assert flag(cpu, 'C')
+
+    # -----------------------------------------------------------------------
+    # CB SRA  (0xCB 0x28–0x2F) — shift right arithmetic, bit 7 preserved
+    # -----------------------------------------------------------------------
+
+    def test_sra_preserves_sign(self):
+        cpu = make_cpu()
+        cpu.H = 0b10000001
+        load_prog(cpu, [0xCB, 0x2C])    # SRA H
+        cpu.step()
+        assert cpu.H == 0b11000000      # bit 7 duplicated
+        assert flag(cpu, 'C')           # old bit 0
+
+    def test_sra_positive(self):
+        cpu = make_cpu()
+        cpu.A = 0b01000010
+        load_prog(cpu, [0xCB, 0x2F])    # SRA A
+        cpu.step()
+        assert cpu.A == 0b00100001
+        assert not flag(cpu, 'C')
+
+    # -----------------------------------------------------------------------
+    # CB SLL  (0xCB 0x30–0x37) — undocumented: shift left, bit 0 ← 1
+    # -----------------------------------------------------------------------
+
+    def test_sll_sets_bit0(self):
+        cpu = make_cpu()
+        cpu.L = 0b01000000
+        load_prog(cpu, [0xCB, 0x35])    # SLL L
+        cycles = cpu.step()
+        assert cpu.L == 0b10000001      # bit 0 = 1
+        assert not flag(cpu, 'C')
+        assert cycles == 8
+
+    def test_sll_carry_out(self):
+        cpu = make_cpu()
+        cpu.B = 0b10000000
+        load_prog(cpu, [0xCB, 0x30])    # SLL B
+        cpu.step()
+        assert cpu.B == 0b00000001
+        assert flag(cpu, 'C')
+
+    # -----------------------------------------------------------------------
+    # CB SRL  (0xCB 0x38–0x3F) — shift right logical, bit 7 ← 0
+    # -----------------------------------------------------------------------
+
+    def test_srl_a(self):
+        cpu = make_cpu()
+        cpu.A = 0b10000001
+        load_prog(cpu, [0xCB, 0x3F])    # SRL A
+        cpu.step()
+        assert cpu.A == 0b01000000      # bit 7 = 0
+        assert flag(cpu, 'C')           # old bit 0
+
+    def test_srl_zero_fill(self):
+        cpu = make_cpu()
+        cpu.A = 0b10000000
+        load_prog(cpu, [0xCB, 0x3F])
+        cpu.step()
+        assert cpu.A == 0b01000000
+        assert not flag(cpu, 'C')
+        assert not flag(cpu, 'S')       # logical: bit 7 always 0
+
+    # -----------------------------------------------------------------------
+    # CB BIT  (0xCB 0x40–0x7F) — test bit; Z/H/N affected, C preserved
+    # -----------------------------------------------------------------------
+
+    def test_bit_zero_sets_z(self):
+        cpu = make_cpu()
+        cpu.B = 0b11111110              # bit 0 = 0
+        load_prog(cpu, [0xCB, 0x40])    # BIT 0, B
+        cycles = cpu.step()
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'N')
+        assert cycles == 8
+
+    def test_bit_nonzero_clears_z(self):
+        cpu = make_cpu()
+        cpu.B = 0b00000001              # bit 0 = 1
+        load_prog(cpu, [0xCB, 0x40])    # BIT 0, B
+        cpu.step()
+        assert not flag(cpu, 'Z')
+        assert flag(cpu, 'H')
+
+    def test_bit_7_sets_s_when_set(self):
+        cpu = make_cpu()
+        cpu.A = 0b10000000
+        load_prog(cpu, [0xCB, 0x7F])    # BIT 7, A
+        cpu.step()
+        assert flag(cpu, 'S')
+        assert not flag(cpu, 'Z')
+
+    def test_bit_7_clears_s_when_clear(self):
+        cpu = make_cpu()
+        cpu.A = 0b01111111
+        load_prog(cpu, [0xCB, 0x7F])    # BIT 7, A
+        cpu.step()
+        assert not flag(cpu, 'S')
+        assert flag(cpu, 'Z')
+
+    def test_bit_preserves_carry(self):
+        cpu = make_cpu()
+        cpu.B = 0xFF
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xCB, 0x40])    # BIT 0, B
+        cpu.step()
+        assert flag(cpu, 'C')
+
+    def test_bit_does_not_change_register(self):
+        cpu = make_cpu()
+        cpu.B = 0b10101010
+        load_prog(cpu, [0xCB, 0x40])
+        cpu.step()
+        assert cpu.B == 0b10101010      # BIT never modifies the register
+
+    def test_bit_hl_mem(self):
+        # BIT on (HL): 12 cycles
+        cpu = make_cpu()
+        cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0b00000010
+        load_prog(cpu, [0xCB, 0x46])    # BIT 0, (HL)
+        cycles = cpu.step()
+        assert flag(cpu, 'Z')           # bit 0 = 0
+        assert cycles == 12
+
+    def test_bit_hl_mem_nonzero(self):
+        cpu = make_cpu()
+        cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0b00000001
+        load_prog(cpu, [0xCB, 0x46])    # BIT 0, (HL)
+        cpu.step()
+        assert not flag(cpu, 'Z')
+
+    # -----------------------------------------------------------------------
+    # CB RES  (0xCB 0x80–0xBF) — clear a bit
+    # -----------------------------------------------------------------------
+
+    def test_res_clears_bit(self):
+        cpu = make_cpu()
+        cpu.B = 0xFF
+        load_prog(cpu, [0xCB, 0x80])    # RES 0, B
+        cycles = cpu.step()
+        assert cpu.B == 0b11111110
+        assert cycles == 8
+
+    def test_res_bit3(self):
+        cpu = make_cpu()
+        cpu.A = 0xFF
+        load_prog(cpu, [0xCB, 0xBF])    # RES 7, A
+        cpu.step()
+        assert cpu.A == 0b01111111
+
+    def test_res_hl_mem(self):
+        cpu = make_cpu()
+        cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0xFF
+        load_prog(cpu, [0xCB, 0x86])    # RES 0, (HL)
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC000] == 0b11111110
+        assert cycles == 15
+
+    def test_res_idempotent(self):
+        # Clearing an already-clear bit leaves value unchanged
+        cpu = make_cpu()
+        cpu.C = 0b11111110
+        load_prog(cpu, [0xCB, 0x81])    # RES 0, C
+        cpu.step()
+        assert cpu.C == 0b11111110
+
+    # -----------------------------------------------------------------------
+    # CB SET  (0xCB 0xC0–0xFF) — set a bit
+    # -----------------------------------------------------------------------
+
+    def test_set_sets_bit(self):
+        cpu = make_cpu()
+        cpu.B = 0b00000000
+        load_prog(cpu, [0xCB, 0xC0])    # SET 0, B
+        cycles = cpu.step()
+        assert cpu.B == 0b00000001
+        assert cycles == 8
+
+    def test_set_bit7(self):
+        cpu = make_cpu()
+        cpu.A = 0b00000000
+        load_prog(cpu, [0xCB, 0xFF])    # SET 7, A
+        cpu.step()
+        assert cpu.A == 0b10000000
+
+    def test_set_hl_mem(self):
+        cpu = make_cpu()
+        cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0b00000000
+        load_prog(cpu, [0xCB, 0xC6])    # SET 0, (HL)
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC000] == 0b00000001
+        assert cycles == 15
+
+    def test_set_idempotent(self):
+        # Setting an already-set bit leaves value unchanged
+        cpu = make_cpu()
+        cpu.D = 0b11111111
+        load_prog(cpu, [0xCB, 0xC2])    # SET 0, D
+        cpu.step()
+        assert cpu.D == 0b11111111
+
+    def test_set_does_not_affect_flags(self):
+        # SET and RES do not change flags
+        cpu = make_cpu()
+        cpu.B = 0x00
+        cpu.F = 0b01000101              # some flag pattern
+        load_prog(cpu, [0xCB, 0xC0])
+        cpu.step()
+        assert cpu.F == 0b01000101
