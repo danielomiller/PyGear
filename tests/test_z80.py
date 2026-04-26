@@ -504,3 +504,633 @@ class TestLoad:
         assert cpu.halted is True
         assert cycles == 4
         assert cpu.PC == 0x0000
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — 8-bit ALU and flags
+# ---------------------------------------------------------------------------
+
+class TestALU8:
+
+    # -----------------------------------------------------------------------
+    # ADD A, r  /  ADD A, n
+    # -----------------------------------------------------------------------
+
+    def test_add_basic(self):
+        cpu = make_cpu()
+        cpu.A = 0x10; cpu.B = 0x20
+        load_prog(cpu, [0x80])          # ADD A, B
+        cycles = cpu.step()
+        assert cpu.A == 0x30
+        assert not flag(cpu, 'S')
+        assert not flag(cpu, 'Z')
+        assert not flag(cpu, 'H')
+        assert not flag(cpu, 'PV')
+        assert not flag(cpu, 'N')
+        assert not flag(cpu, 'C')
+        assert cycles == 4
+
+    def test_add_carry_and_zero(self):
+        # 0xFF + 0x01 → 0x00  (C=1, Z=1, H=1)
+        cpu = make_cpu()
+        cpu.A = 0xFF; cpu.B = 0x01
+        load_prog(cpu, [0x80])
+        cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'PV')
+        assert not flag(cpu, 'N')
+
+    def test_add_half_carry(self):
+        # 0x0F + 0x01 → 0x10  (H=1 only)
+        cpu = make_cpu()
+        cpu.A = 0x0F; cpu.B = 0x01
+        load_prog(cpu, [0x80])
+        cpu.step()
+        assert cpu.A == 0x10
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'C')
+
+    def test_add_overflow_positive(self):
+        # 0x7F + 0x01 → 0x80  (PV=1, S=1, H=1)
+        cpu = make_cpu()
+        cpu.A = 0x7F; cpu.B = 0x01
+        load_prog(cpu, [0x80])
+        cpu.step()
+        assert cpu.A == 0x80
+        assert flag(cpu, 'S')
+        assert flag(cpu, 'PV')
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'C')
+
+    def test_add_overflow_negative(self):
+        # 0x80 + 0x80 → 0x00  (PV=1, Z=1, C=1)
+        cpu = make_cpu()
+        cpu.A = 0x80; cpu.B = 0x80
+        load_prog(cpu, [0x80])
+        cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'PV')
+        assert not flag(cpu, 'S')
+
+    def test_add_clears_n_flag(self):
+        cpu = make_cpu()
+        cpu.A = 0x01; cpu.B = 0x01
+        set_flags(cpu, N=True)
+        load_prog(cpu, [0x80])
+        cpu.step()
+        assert not flag(cpu, 'N')
+
+    def test_add_n_immediate(self):
+        cpu = make_cpu()
+        cpu.A = 0x05
+        load_prog(cpu, [0xC6, 0x03])    # ADD A, 3
+        cycles = cpu.step()
+        assert cpu.A == 0x08
+        assert cycles == 7
+
+    def test_add_hl_mem(self):
+        # ADD A, (HL) — 7 cycles, reads from memory
+        cpu = make_cpu()
+        cpu.A = 0x10; cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0x05
+        load_prog(cpu, [0x86])
+        cycles = cpu.step()
+        assert cpu.A == 0x15
+        assert cycles == 7
+
+    # -----------------------------------------------------------------------
+    # ADC A, r  /  ADC A, n
+    # -----------------------------------------------------------------------
+
+    def test_adc_without_carry(self):
+        cpu = make_cpu()
+        cpu.A = 0x10; cpu.B = 0x05
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0x88])          # ADC A, B
+        cpu.step()
+        assert cpu.A == 0x15
+
+    def test_adc_with_carry(self):
+        cpu = make_cpu()
+        cpu.A = 0x10; cpu.B = 0x05
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0x88])
+        cpu.step()
+        assert cpu.A == 0x16
+
+    def test_adc_carry_into_overflow(self):
+        # 0x7E + 0x01 + C=1 → 0x80  (PV=1)
+        cpu = make_cpu()
+        cpu.A = 0x7E; cpu.B = 0x01
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0x88])
+        cpu.step()
+        assert cpu.A == 0x80
+        assert flag(cpu, 'PV')
+        assert flag(cpu, 'S')
+
+    def test_adc_n_immediate(self):
+        cpu = make_cpu()
+        cpu.A = 0x01
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xCE, 0x02])    # ADC A, 2
+        cycles = cpu.step()
+        assert cpu.A == 0x04
+        assert cycles == 7
+
+    # -----------------------------------------------------------------------
+    # SUB r  /  SUB n
+    # -----------------------------------------------------------------------
+
+    def test_sub_basic(self):
+        cpu = make_cpu()
+        cpu.A = 0x20; cpu.B = 0x10
+        load_prog(cpu, [0x90])          # SUB B
+        cycles = cpu.step()
+        assert cpu.A == 0x10
+        assert flag(cpu, 'N')
+        assert not flag(cpu, 'C')
+        assert not flag(cpu, 'Z')
+        assert cycles == 4
+
+    def test_sub_to_zero(self):
+        cpu = make_cpu()
+        cpu.A = 0x05; cpu.B = 0x05
+        load_prog(cpu, [0x90])
+        cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'N')
+        assert not flag(cpu, 'C')
+
+    def test_sub_borrow(self):
+        # 0x00 - 0x01 → 0xFF  (C=1, S=1, H=1)
+        cpu = make_cpu()
+        cpu.A = 0x00; cpu.B = 0x01
+        load_prog(cpu, [0x90])
+        cpu.step()
+        assert cpu.A == 0xFF
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'S')
+        assert flag(cpu, 'H')
+
+    def test_sub_overflow(self):
+        # 0x80 - 0x01 → 0x7F  (PV=1: negative − positive = positive)
+        cpu = make_cpu()
+        cpu.A = 0x80; cpu.B = 0x01
+        load_prog(cpu, [0x90])
+        cpu.step()
+        assert cpu.A == 0x7F
+        assert flag(cpu, 'PV')
+        assert not flag(cpu, 'C')
+
+    def test_sub_n_immediate(self):
+        cpu = make_cpu()
+        cpu.A = 0x10
+        load_prog(cpu, [0xD6, 0x05])    # SUB 5
+        cycles = cpu.step()
+        assert cpu.A == 0x0B
+        assert cycles == 7
+
+    # -----------------------------------------------------------------------
+    # SBC A, r  /  SBC A, n
+    # -----------------------------------------------------------------------
+
+    def test_sbc_without_carry(self):
+        cpu = make_cpu()
+        cpu.A = 0x10; cpu.B = 0x05
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0x98])          # SBC A, B
+        cpu.step()
+        assert cpu.A == 0x0B
+        assert flag(cpu, 'N')
+
+    def test_sbc_with_carry(self):
+        cpu = make_cpu()
+        cpu.A = 0x10; cpu.B = 0x05
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0x98])
+        cpu.step()
+        assert cpu.A == 0x0A
+
+    def test_sbc_borrow_chain(self):
+        # 0x00 - 0x00 - C=1 → 0xFF  (C=1)
+        cpu = make_cpu()
+        cpu.A = 0x00; cpu.B = 0x00
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0x98])
+        cpu.step()
+        assert cpu.A == 0xFF
+        assert flag(cpu, 'C')
+
+    def test_sbc_n_immediate(self):
+        cpu = make_cpu()
+        cpu.A = 0x10
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xDE, 0x05])    # SBC A, 5
+        cycles = cpu.step()
+        assert cpu.A == 0x0A
+        assert cycles == 7
+
+    # -----------------------------------------------------------------------
+    # AND r  /  AND n
+    # -----------------------------------------------------------------------
+
+    def test_and_basic(self):
+        cpu = make_cpu()
+        cpu.A = 0xF0; cpu.B = 0x0F
+        load_prog(cpu, [0xA0])          # AND B
+        cycles = cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'N')
+        assert not flag(cpu, 'C')
+        assert cycles == 4
+
+    def test_and_sets_parity(self):
+        # 0xFF & 0x03 = 0x03 — two bits set → even parity → PV=1
+        cpu = make_cpu()
+        cpu.A = 0xFF; cpu.B = 0x03
+        load_prog(cpu, [0xA0])
+        cpu.step()
+        assert cpu.A == 0x03
+        assert flag(cpu, 'PV')
+
+    def test_and_clears_carry(self):
+        cpu = make_cpu()
+        cpu.A = 0xFF; cpu.B = 0xFF
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xA0])
+        cpu.step()
+        assert not flag(cpu, 'C')
+
+    def test_and_n_immediate(self):
+        cpu = make_cpu()
+        cpu.A = 0xAA
+        load_prog(cpu, [0xE6, 0x55])    # AND 0x55
+        cycles = cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert cycles == 7
+
+    # -----------------------------------------------------------------------
+    # XOR r  /  XOR n
+    # -----------------------------------------------------------------------
+
+    def test_xor_self_zero(self):
+        # XOR A — always yields 0 with Z=1, all others clear
+        cpu = make_cpu()
+        cpu.A = 0x42
+        set_flags(cpu, C=True, N=True, H=True)
+        load_prog(cpu, [0xAF])          # XOR A
+        cycles = cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert not flag(cpu, 'H')
+        assert not flag(cpu, 'N')
+        assert not flag(cpu, 'C')
+        assert flag(cpu, 'PV')          # zero has even parity
+        assert cycles == 4
+
+    def test_xor_basic(self):
+        cpu = make_cpu()
+        cpu.A = 0xFF; cpu.B = 0x0F
+        load_prog(cpu, [0xA8])          # XOR B
+        cpu.step()
+        assert cpu.A == 0xF0
+        assert flag(cpu, 'S')
+        assert not flag(cpu, 'H')
+
+    def test_xor_n_immediate(self):
+        cpu = make_cpu()
+        cpu.A = 0x55
+        load_prog(cpu, [0xEE, 0xAA])    # XOR 0xAA
+        cycles = cpu.step()
+        assert cpu.A == 0xFF
+        assert cycles == 7
+
+    # -----------------------------------------------------------------------
+    # OR r  /  OR n
+    # -----------------------------------------------------------------------
+
+    def test_or_basic(self):
+        cpu = make_cpu()
+        cpu.A = 0xF0; cpu.B = 0x0F
+        load_prog(cpu, [0xB0])          # OR B
+        cycles = cpu.step()
+        assert cpu.A == 0xFF
+        assert flag(cpu, 'S')
+        assert not flag(cpu, 'Z')
+        assert not flag(cpu, 'H')
+        assert not flag(cpu, 'N')
+        assert not flag(cpu, 'C')
+        assert cycles == 4
+
+    def test_or_zero(self):
+        cpu = make_cpu()
+        cpu.A = 0x00; cpu.B = 0x00
+        load_prog(cpu, [0xB0])
+        cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'PV')          # zero parity
+
+    def test_or_n_immediate(self):
+        cpu = make_cpu()
+        cpu.A = 0x0F
+        load_prog(cpu, [0xF6, 0xF0])    # OR 0xF0
+        cycles = cpu.step()
+        assert cpu.A == 0xFF
+        assert cycles == 7
+
+    # -----------------------------------------------------------------------
+    # CP r  /  CP n
+    # -----------------------------------------------------------------------
+
+    def test_cp_equal(self):
+        # CP where A == operand → Z=1, A unchanged
+        cpu = make_cpu()
+        cpu.A = 0x42; cpu.B = 0x42
+        load_prog(cpu, [0xB8])          # CP B
+        cycles = cpu.step()
+        assert cpu.A == 0x42            # A must not change
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'N')
+        assert not flag(cpu, 'C')
+        assert cycles == 4
+
+    def test_cp_less_than(self):
+        # A < operand → borrow, C=1
+        cpu = make_cpu()
+        cpu.A = 0x01; cpu.B = 0x02
+        load_prog(cpu, [0xB8])
+        cpu.step()
+        assert cpu.A == 0x01            # A unchanged
+        assert flag(cpu, 'C')
+        assert not flag(cpu, 'Z')
+
+    def test_cp_yx_from_operand(self):
+        # Y/X undocumented flags come from the *operand*, not the result
+        cpu = make_cpu()
+        cpu.A = 0xFF
+        cpu.B = 0b00101000              # bits 5 and 3 set
+        load_prog(cpu, [0xB8])
+        cpu.step()
+        assert cpu.F & Y_FLAG           # bit 5 of operand
+        assert cpu.F & X_FLAG           # bit 3 of operand
+
+    def test_cp_n_immediate(self):
+        cpu = make_cpu()
+        cpu.A = 0x10
+        load_prog(cpu, [0xFE, 0x10])    # CP 0x10
+        cycles = cpu.step()
+        assert cpu.A == 0x10
+        assert flag(cpu, 'Z')
+        assert cycles == 7
+
+    # -----------------------------------------------------------------------
+    # INC r
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,reg_attr", [
+        (0x04, 'B'), (0x0C, 'C'), (0x14, 'D'), (0x1C, 'E'),
+        (0x24, 'H'), (0x2C, 'L'), (0x3C, 'A'),
+    ])
+    def test_inc_r_basic(self, opcode, reg_attr):
+        cpu = make_cpu()
+        setattr(cpu, reg_attr, 0x41)
+        load_prog(cpu, [opcode])
+        cycles = cpu.step()
+        assert getattr(cpu, reg_attr) == 0x42
+        assert not flag(cpu, 'Z')
+        assert not flag(cpu, 'S')
+        assert not flag(cpu, 'PV')
+        assert not flag(cpu, 'N')
+        assert cycles == 4
+
+    def test_inc_ff_wraps_to_zero(self):
+        # INC B: 0xFF → 0x00, Z=1, H=1
+        cpu = make_cpu()
+        cpu.B = 0xFF
+        set_flags(cpu, C=True)          # carry must be preserved
+        load_prog(cpu, [0x04])
+        cpu.step()
+        assert cpu.B == 0x00
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'S')
+        assert not flag(cpu, 'PV')
+        assert flag(cpu, 'C')           # C unchanged by INC
+
+    def test_inc_7f_overflow(self):
+        # INC B: 0x7F → 0x80, PV=1, S=1, H=1; C is preserved (not changed)
+        cpu = make_cpu()
+        cpu.B = 0x7F
+        set_flags(cpu, C=False)         # explicitly clear so we can assert it stays clear
+        load_prog(cpu, [0x04])
+        cpu.step()
+        assert cpu.B == 0x80
+        assert flag(cpu, 'PV')
+        assert flag(cpu, 'S')
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'Z')
+        assert not flag(cpu, 'C')       # C was False before → still False
+
+    def test_inc_does_not_set_n(self):
+        cpu = make_cpu()
+        cpu.B = 0x00
+        set_flags(cpu, N=True)
+        load_prog(cpu, [0x04])
+        cpu.step()
+        assert not flag(cpu, 'N')
+
+    def test_inc_hl_mem(self):
+        # INC (HL): 11 cycles, writes back to memory
+        cpu = make_cpu()
+        cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0x09
+        load_prog(cpu, [0x34])
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC000] == 0x0A
+        assert cycles == 11
+
+    # -----------------------------------------------------------------------
+    # DEC r
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,reg_attr", [
+        (0x05, 'B'), (0x0D, 'C'), (0x15, 'D'), (0x1D, 'E'),
+        (0x25, 'H'), (0x2D, 'L'), (0x3D, 'A'),
+    ])
+    def test_dec_r_basic(self, opcode, reg_attr):
+        cpu = make_cpu()
+        setattr(cpu, reg_attr, 0x42)
+        load_prog(cpu, [opcode])
+        cycles = cpu.step()
+        assert getattr(cpu, reg_attr) == 0x41
+        assert flag(cpu, 'N')
+        assert not flag(cpu, 'Z')
+        assert not flag(cpu, 'PV')
+        assert cycles == 4
+
+    def test_dec_to_zero(self):
+        # DEC B: 0x01 → 0x00, Z=1, N=1
+        cpu = make_cpu()
+        cpu.B = 0x01
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0x05])
+        cpu.step()
+        assert cpu.B == 0x00
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'N')
+        assert flag(cpu, 'C')           # C unchanged
+
+    def test_dec_80_overflow(self):
+        # DEC B: 0x80 → 0x7F, PV=1, N=1, H=1
+        cpu = make_cpu()
+        cpu.B = 0x80
+        load_prog(cpu, [0x05])
+        cpu.step()
+        assert cpu.B == 0x7F
+        assert flag(cpu, 'PV')
+        assert flag(cpu, 'N')
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'S')
+
+    def test_dec_00_wraps(self):
+        # DEC B: 0x00 → 0xFF, S=1, N=1, H=1
+        cpu = make_cpu()
+        cpu.B = 0x00
+        load_prog(cpu, [0x05])
+        cpu.step()
+        assert cpu.B == 0xFF
+        assert flag(cpu, 'S')
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'Z')
+
+    def test_dec_preserves_carry(self):
+        cpu = make_cpu()
+        cpu.B = 0x10
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0x05])
+        cpu.step()
+        assert flag(cpu, 'C')
+
+    def test_dec_hl_mem(self):
+        # DEC (HL): 11 cycles
+        cpu = make_cpu()
+        cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0x0A
+        load_prog(cpu, [0x35])
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC000] == 0x09
+        assert cycles == 11
+
+    # -----------------------------------------------------------------------
+    # 16-bit INC / DEC rr  (no flags affected)
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,reg_attr,init,expected", [
+        (0x03, 'BC', 0x00FF, 0x0100),
+        (0x13, 'DE', 0xFFFF, 0x0000),
+        (0x23, 'HL', 0x0000, 0x0001),
+        (0x33, 'SP', 0x0100, 0x0101),
+    ])
+    def test_inc_rr(self, opcode, reg_attr, init, expected):
+        cpu = make_cpu()
+        setattr(cpu, reg_attr, init)
+        cpu.F = 0xFF                    # all flags set — none should change
+        load_prog(cpu, [opcode])
+        cycles = cpu.step()
+        assert getattr(cpu, reg_attr) == expected
+        assert cpu.F == 0xFF            # flags untouched
+        assert cycles == 6
+
+    @pytest.mark.parametrize("opcode,reg_attr,init,expected", [
+        (0x0B, 'BC', 0x0100, 0x00FF),
+        (0x1B, 'DE', 0x0000, 0xFFFF),
+        (0x2B, 'HL', 0x0001, 0x0000),
+        (0x3B, 'SP', 0x0101, 0x0100),
+    ])
+    def test_dec_rr(self, opcode, reg_attr, init, expected):
+        cpu = make_cpu()
+        setattr(cpu, reg_attr, init)
+        cpu.F = 0x00                    # all flags clear — none should change
+        load_prog(cpu, [opcode])
+        cycles = cpu.step()
+        assert getattr(cpu, reg_attr) == expected
+        assert cpu.F == 0x00
+        assert cycles == 6
+
+    # -----------------------------------------------------------------------
+    # CPL  (complement A)
+    # -----------------------------------------------------------------------
+
+    def test_cpl(self):
+        cpu = make_cpu()
+        cpu.A = 0b10110100
+        set_flags(cpu, S=True, Z=True, PV=True, C=True)
+        load_prog(cpu, [0x2F])
+        cycles = cpu.step()
+        assert cpu.A == 0b01001011
+        assert flag(cpu, 'H')
+        assert flag(cpu, 'N')
+        assert flag(cpu, 'S')           # S/Z/PV/C preserved
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'PV')
+        assert flag(cpu, 'C')
+        assert cycles == 4
+
+    # -----------------------------------------------------------------------
+    # NEG  (ED 44h)
+    # -----------------------------------------------------------------------
+
+    def test_neg_normal(self):
+        # NEG: A = 0 - A
+        cpu = make_cpu()
+        cpu.A = 0x05
+        load_prog(cpu, [0xED, 0x44])
+        cycles = cpu.step()
+        assert cpu.A == 0xFB
+        assert flag(cpu, 'S')
+        assert flag(cpu, 'C')           # result non-zero → borrow
+        assert flag(cpu, 'N')
+        assert not flag(cpu, 'Z')
+        assert not flag(cpu, 'PV')
+        assert cycles == 8
+
+    def test_neg_zero(self):
+        # NEG 0 → 0, Z=1, C=0
+        cpu = make_cpu()
+        cpu.A = 0x00
+        load_prog(cpu, [0xED, 0x44])
+        cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert not flag(cpu, 'C')
+
+    def test_neg_0x80_overflow(self):
+        # NEG 0x80 → 0x80, PV=1 (only case)
+        cpu = make_cpu()
+        cpu.A = 0x80
+        load_prog(cpu, [0xED, 0x44])
+        cpu.step()
+        assert cpu.A == 0x80
+        assert flag(cpu, 'PV')
+        assert flag(cpu, 'C')
+
+    def test_neg_0x01(self):
+        # NEG 0x01 → 0xFF, C=1, S=1
+        cpu = make_cpu()
+        cpu.A = 0x01
+        load_prog(cpu, [0xED, 0x44])
+        cpu.step()
+        assert cpu.A == 0xFF
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'S')
