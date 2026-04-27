@@ -2,12 +2,17 @@
 
 Structure
 ---------
-TestVDPPorts    — control/data port I/O, VRAM, CRAM, registers, address latch,
-                  auto-increment, status clear-on-read, V/H counters.
-TestTileDecoder — 4bpp planar tile decode, hflip, vflip.
-
-More test classes will be added in subsequent tasks (background renderer,
-timing/interrupts).
+TestVDPPorts    — control/data port I/O, VRAM/CRAM write/read, register writes,
+                  address auto-increment, status clear-on-read, address latch
+                  reset on data access, V/H counters.
+TestTileDecoder — 4bpp planar tile decode, hflip, vflip, combined flip.
+TestBackground  — scanline renderer: known tile pattern, H/V scroll, palette
+                  selection, priority bit, scroll-lock flags.
+TestCRAMColor   — 12-bit BGR decode, 4-bit channel scaling, all 32 entries.
+TestVDPTiming   — V-counter progression (via step), H-counter, line interrupt
+                  at correct scanline, VBlank flag/interrupt, frame assembly,
+                  crop edges, reset mid-frame, frame content updates.
+TestIntegration — end-to-end pipeline: VRAM write → step → framebuffer pixel.
 """
 
 import sys
@@ -1431,3 +1436,216 @@ class TestVDPTiming:
         assert vdp.frame_ready
         step_lines(vdp, TOTAL_LINES - ACTIVE_LINES)
         assert vdp.frame_ready  # still True; caller hasn't cleared it
+
+    # -----------------------------------------------------------------------
+    # V-counter progression via step() — spec item "V-counter progression"
+    # -----------------------------------------------------------------------
+
+    def test_vcounter_reads_correct_value_after_step(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, 10)
+        assert vdp.port_read(0x7E) == 10
+
+    def test_vcounter_at_last_linear_line_via_step(self):
+        # Line 0xDA (218) is the last line with an identity V-counter mapping
+        vdp = make_timing_vdp()
+        step_lines(vdp, 0xDA)
+        assert vdp.port_read(0x7E) == 0xDA
+
+    def test_vcounter_nonlinear_jump_via_step(self):
+        # After stepping to line 219 (0xDB) V-counter should report 0xD5
+        vdp = make_timing_vdp()
+        step_lines(vdp, 0xDB)
+        assert vdp.port_read(0x7E) == 0xD5
+
+    def test_vcounter_end_of_frame_via_step(self):
+        # Line 261 → V-counter 0xFF
+        vdp = make_timing_vdp()
+        step_lines(vdp, 261)
+        assert vdp.port_read(0x7E) == 0xFF
+
+    def test_vcounter_wraps_to_zero_after_full_frame(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, TOTAL_LINES)
+        assert vdp.port_read(0x7E) == 0
+
+    # -----------------------------------------------------------------------
+    # H-counter progression via step()
+    # -----------------------------------------------------------------------
+
+    def test_hcounter_zero_at_start_of_new_line(self):
+        # After completing an exact number of lines, _cycle resets to 0
+        vdp = make_timing_vdp()
+        step_lines(vdp, 5)
+        assert vdp.port_read(0x7F) == 0   # _cycle == 0 → H-counter == 0
+
+    def test_hcounter_nonzero_mid_line(self):
+        # Part-way through a line the H-counter should be non-zero
+        vdp = make_timing_vdp()
+        vdp.step(CYCLES_PER_LINE + 40)    # 1 full line + 40 extra cycles
+        assert vdp.port_read(0x7F) == 20  # 40 >> 1
+
+    # -----------------------------------------------------------------------
+    # Reset mid-frame
+    # -----------------------------------------------------------------------
+
+    def test_reset_mid_frame_clears_line(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, 50)
+        vdp.reset()
+        assert vdp._line == 0
+
+    def test_reset_mid_frame_clears_cycle(self):
+        vdp = make_timing_vdp()
+        vdp.step(100)
+        vdp.reset()
+        assert vdp._cycle == 0
+
+    def test_reset_mid_frame_clears_frame_ready(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.frame_ready
+        vdp.reset()
+        assert not vdp.frame_ready
+
+    def test_reset_mid_frame_clears_line_buffer(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, 10)
+        vdp.reset()
+        assert all(vdp._line_buffer[i] is None for i in range(ACTIVE_LINES))
+
+    def test_reset_clears_vblank_status_flag(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.status & 0x80
+        vdp.reset()
+        assert not (vdp.status & 0x80)
+
+    def test_step_works_correctly_after_reset(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, 100)
+        vdp.reset()
+        step_lines(vdp, 5)
+        assert vdp._line == 5
+
+    # -----------------------------------------------------------------------
+    # Frame content updates each VBlank
+    # -----------------------------------------------------------------------
+
+    def test_frame_content_updates_between_frames(self):
+        # Render frame 1 with CRAM entry 1 = red; then change to blue and
+        # render frame 2; the second frame's pixel must change.
+        vdp = make_bg_vdp()
+        write_solid_tile(vdp, 1, color=1)
+        write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=1)
+
+        write_cram_color(vdp, 1, r4=0xF, g4=0, b4=0)    # red
+        step_lines(vdp, ACTIVE_LINES)
+        frame1_pixel = vdp.frame[0][0]
+        assert frame1_pixel == (255, 0, 0)
+
+        # Change colour and render a second frame
+        vdp.frame_ready = False
+        write_cram_color(vdp, 1, r4=0, g4=0, b4=0xF)    # blue
+        step_lines(vdp, TOTAL_LINES)
+        assert vdp.frame[0][0] == (0, 0, 255)
+
+    def test_second_frame_reflects_vram_changes(self):
+        # Change the tile referenced by the name table between frames
+        vdp = make_bg_vdp()
+        write_cram_color(vdp, 1, r4=0xF, g4=0, b4=0)
+        write_cram_color(vdp, 2, r4=0, g4=0xF, b4=0)
+
+        write_solid_tile(vdp, 1, color=1)       # colour 1 = red
+        write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=1)
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.frame[0][0] == (255, 0, 0)
+
+        vdp.frame_ready = False
+        write_solid_tile(vdp, 1, color=2)       # colour 2 = green (same tile slot)
+        step_lines(vdp, TOTAL_LINES)
+        assert vdp.frame[0][0] == (0, 255, 0)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end integration
+# ---------------------------------------------------------------------------
+
+class TestIntegration:
+    """Full pipeline: VRAM tile write → name table → step → frame pixel."""
+
+    def test_full_pipeline_known_pixel(self):
+        # Set up a VDP with a solid-colour tile at a known screen position,
+        # step through a full active display, and verify the framebuffer pixel.
+        vdp = make_bg_vdp()
+        cpu = MockCPU()
+        vdp.attach_cpu(cpu)
+        vdp.regs[1] = 0x20    # enable VBlank interrupt
+
+        # CRAM entry 7 → orange-ish (R=F, G=8, B=0)
+        write_cram_color(vdp, 7, r4=0xF, g4=0x8, b4=0)
+        write_solid_tile(vdp, 5, color=7)
+        # Place tile at the name-table position that maps to frame pixel (0,0)
+        write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=5)
+
+        step_lines(vdp, ACTIVE_LINES)
+
+        assert vdp.frame_ready
+        assert cpu.interrupt_count == 1             # VBlank interrupt fired
+        assert vdp.frame[0][0] == (255, 0x8 * 17, 0)
+
+    def test_full_pipeline_all_crop_corners(self):
+        # Place a distinct colour at each corner of the 160×144 crop window
+        # and verify all four frame corners after one frame.
+        vdp = make_bg_vdp()
+
+        colours = [
+            (1, 0xF, 0, 0),   # TL: CRAM 1 = red
+            (2, 0, 0xF, 0),   # TR: CRAM 2 = green
+            (3, 0, 0, 0xF),   # BL: CRAM 3 = blue
+            (4, 0xF, 0xF, 0), # BR: CRAM 4 = yellow
+        ]
+        for idx, r4, g4, b4 in colours:
+            write_cram_color(vdp, idx, r4=r4, g4=g4, b4=b4)
+
+        tl_tc, tl_tr = CROP_Y // 8, CROP_X // 8                     # tile row/col for TL
+        tr_tc, tr_tr = CROP_Y // 8, (CROP_X + SCREEN_W - 1) // 8   # TR
+        bl_tc, bl_tr = (CROP_Y + SCREEN_H - 1) // 8, CROP_X // 8  # BL
+        br_tc, br_tr = (CROP_Y + SCREEN_H - 1) // 8, (CROP_X + SCREEN_W - 1) // 8  # BR
+
+        write_solid_tile(vdp, 11, color=1); write_name_entry(vdp, tl_tc, tl_tr, tile_num=11)
+        write_solid_tile(vdp, 12, color=2); write_name_entry(vdp, tr_tc, tr_tr, tile_num=12)
+        write_solid_tile(vdp, 13, color=3); write_name_entry(vdp, bl_tc, bl_tr, tile_num=13)
+        write_solid_tile(vdp, 14, color=4); write_name_entry(vdp, br_tc, br_tr, tile_num=14)
+
+        step_lines(vdp, ACTIVE_LINES)
+
+        assert vdp.frame[0][0]                    == (255, 0, 0)    # TL red
+        assert vdp.frame[0][SCREEN_W - 1]         == (0, 255, 0)    # TR green
+        assert vdp.frame[SCREEN_H - 1][0]         == (0, 0, 255)    # BL blue
+        assert vdp.frame[SCREEN_H - 1][SCREEN_W - 1] == (255, 255, 0)  # BR yellow
+
+    def test_port_write_vram_then_render(self):
+        # Write a tile to VRAM via the port interface (not direct array access),
+        # then verify it renders correctly.
+        vdp = make_bg_vdp()
+        write_cram_color(vdp, 3, r4=0, g4=0, b4=0xF)
+
+        # Use port 0xBF/0xBE to write tile data for tile 0 at address 0x0000
+        vdp.port_write(0xBF, 0x00)           # addr low = 0x00
+        vdp.port_write(0xBF, (0b01 << 6))    # code=01 (VRAM write), addr high = 0
+
+        # Row 0 of tile 0: plane 0 = 0xFF, planes 1-3 = 0 → colour index 1 (but we
+        # want index 3 = 0b0011, so plane 0 and plane 1 both 0xFF)
+        # Write 32 bytes: pattern for solid colour 3 in all rows
+        b0 = 0xFF   # plane 0 set → bit 0 of index
+        b1 = 0xFF   # plane 1 set → bit 1 of index
+        b2 = 0x00
+        b3 = 0x00
+        for _ in range(8):    # 8 rows
+            for byte in (b0, b1, b2, b3):
+                vdp.port_write(0xBE, byte)
+
+        write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=0, palette=0)
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.frame[0][0] == (0, 0, 255)   # CRAM 3 = blue
