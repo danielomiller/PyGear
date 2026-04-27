@@ -1835,3 +1835,498 @@ class TestDAA:
         cpu = self._sub_then_daa(0x10, 0x05)
         assert cpu.A == 0x05
         assert flag(cpu, 'PV')
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — Control flow, stack, exchange
+# ---------------------------------------------------------------------------
+
+class TestFlow:
+    """JP / JR / CALL / RET / RST / DJNZ."""
+
+    # -----------------------------------------------------------------------
+    # JP nn  (unconditional)
+    # -----------------------------------------------------------------------
+
+    def test_jp_nn(self):
+        cpu = make_cpu()
+        load_prog(cpu, [0xC3, 0x00, 0x50])   # JP 0x5000
+        cycles = cpu.step()
+        assert cpu.PC == 0x5000
+        assert cycles == 10
+
+    def test_jp_nn_always_fetches_operand(self):
+        # Even conditional JP that is not taken must advance PC by 3
+        cpu = make_cpu()
+        set_flags(cpu, Z=True)
+        load_prog(cpu, [0xC2, 0x00, 0x50])   # JP NZ, 0x5000 — not taken
+        cpu.step()
+        assert cpu.PC == 0x0003              # past opcode + 2 operand bytes
+
+    # -----------------------------------------------------------------------
+    # JP cc — one taken + one not-taken test per condition pair
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,flag_name,flag_for_taken,dest", [
+        (0xC2, 'Z',  False, 0x1000),   # JP NZ  — taken when Z=0
+        (0xCA, 'Z',  True,  0x1001),   # JP Z   — taken when Z=1
+        (0xD2, 'C',  False, 0x1002),   # JP NC  — taken when C=0
+        (0xDA, 'C',  True,  0x1003),   # JP C   — taken when C=1
+        (0xE2, 'PV', False, 0x1004),   # JP PO  — taken when PV=0
+        (0xEA, 'PV', True,  0x1005),   # JP PE  — taken when PV=1
+        (0xF2, 'S',  False, 0x1006),   # JP P   — taken when S=0
+        (0xFA, 'S',  True,  0x1007),   # JP M   — taken when S=1
+    ])
+    def test_jp_cc_taken(self, opcode, flag_name, flag_for_taken, dest):
+        cpu = make_cpu()
+        set_flags(cpu, **{flag_name: flag_for_taken})
+        lo, hi = dest & 0xFF, (dest >> 8) & 0xFF
+        load_prog(cpu, [opcode, lo, hi])
+        cpu.step()
+        assert cpu.PC == dest
+
+    @pytest.mark.parametrize("opcode,flag_name,flag_for_taken", [
+        (0xC2, 'Z',  False),
+        (0xCA, 'Z',  True),
+        (0xD2, 'C',  False),
+        (0xDA, 'C',  True),
+        (0xE2, 'PV', False),
+        (0xEA, 'PV', True),
+        (0xF2, 'S',  False),
+        (0xFA, 'S',  True),
+    ])
+    def test_jp_cc_not_taken(self, opcode, flag_name, flag_for_taken):
+        cpu = make_cpu()
+        set_flags(cpu, **{flag_name: not flag_for_taken})  # opposite → not taken
+        load_prog(cpu, [opcode, 0x00, 0x50])
+        cpu.step()
+        assert cpu.PC == 0x0003    # past the 3-byte instruction
+
+    # -----------------------------------------------------------------------
+    # JP (HL)
+    # -----------------------------------------------------------------------
+
+    def test_jp_hl(self):
+        cpu = make_cpu()
+        cpu.HL = 0x4000
+        load_prog(cpu, [0xE9])
+        cycles = cpu.step()
+        assert cpu.PC == 0x4000
+        assert cycles == 4
+
+    # -----------------------------------------------------------------------
+    # JR e  (relative jump)
+    # -----------------------------------------------------------------------
+
+    def test_jr_forward(self):
+        cpu = make_cpu()
+        load_prog(cpu, [0x18, 0x05])   # JR +5 → PC = 2 + 5 = 7
+        cycles = cpu.step()
+        assert cpu.PC == 0x0007
+        assert cycles == 12
+
+    def test_jr_backward(self):
+        cpu = make_cpu()
+        # Place JR at 0x0010, offset -4 → 0x0010 + 2 - 4 = 0x000E
+        load_prog(cpu, [0x18, 0xFC], origin=0x0010)   # 0xFC = -4 signed
+        cpu.step()
+        assert cpu.PC == 0x000E
+
+    def test_jr_zero_offset(self):
+        # JR 0 — jumps to next instruction (tight infinite loop)
+        cpu = make_cpu()
+        load_prog(cpu, [0x18, 0x00])
+        cpu.step()
+        assert cpu.PC == 0x0002
+
+    @pytest.mark.parametrize("opcode,flag_name,flag_for_taken", [
+        (0x20, 'Z', False),   # JR NZ
+        (0x28, 'Z', True),    # JR Z
+        (0x30, 'C', False),   # JR NC
+        (0x38, 'C', True),    # JR C
+    ])
+    def test_jr_cc_taken(self, opcode, flag_name, flag_for_taken):
+        cpu = make_cpu()
+        set_flags(cpu, **{flag_name: flag_for_taken})
+        load_prog(cpu, [opcode, 0x10])   # +16 → PC = 2 + 16 = 18
+        cycles = cpu.step()
+        assert cpu.PC == 0x0012
+        assert cycles == 12
+
+    @pytest.mark.parametrize("opcode,flag_name,flag_for_taken", [
+        (0x20, 'Z', False),
+        (0x28, 'Z', True),
+        (0x30, 'C', False),
+        (0x38, 'C', True),
+    ])
+    def test_jr_cc_not_taken(self, opcode, flag_name, flag_for_taken):
+        cpu = make_cpu()
+        set_flags(cpu, **{flag_name: not flag_for_taken})
+        load_prog(cpu, [opcode, 0x10])
+        cycles = cpu.step()
+        assert cpu.PC == 0x0002   # past opcode + offset byte only
+        assert cycles == 7
+
+    # -----------------------------------------------------------------------
+    # CALL nn  (unconditional)
+    # -----------------------------------------------------------------------
+
+    def test_call_nn(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        load_prog(cpu, [0xCD, 0x00, 0x40])   # CALL 0x4000
+        cycles = cpu.step()
+        assert cpu.PC == 0x4000
+        assert cycles == 17
+        # Return address (0x0003) on stack
+        assert cpu._read16(cpu.SP) == 0x0003
+
+    def test_call_pushes_next_pc(self):
+        # Return address is the byte immediately after the CALL operands
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        load_prog(cpu, [0xCD, 0x00, 0x80], origin=0x0100)
+        cpu.step()
+        assert cpu._read16(cpu.SP) == 0x0103
+
+    # -----------------------------------------------------------------------
+    # CALL cc
+    # -----------------------------------------------------------------------
+
+    def test_call_z_taken(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        set_flags(cpu, Z=True)
+        load_prog(cpu, [0xCC, 0x00, 0x40])   # CALL Z, 0x4000
+        cycles = cpu.step()
+        assert cpu.PC == 0x4000
+        assert cycles == 17
+
+    def test_call_z_not_taken(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        set_flags(cpu, Z=False)
+        sp_before = cpu.SP
+        load_prog(cpu, [0xCC, 0x00, 0x40])
+        cycles = cpu.step()
+        assert cpu.PC == 0x0003    # skips the call
+        assert cpu.SP == sp_before  # stack unchanged
+        assert cycles == 10
+
+    def test_call_nz_taken(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        set_flags(cpu, Z=False)
+        load_prog(cpu, [0xC4, 0x00, 0x40])   # CALL NZ, 0x4000
+        cycles = cpu.step()
+        assert cpu.PC == 0x4000
+        assert cycles == 17
+
+    # -----------------------------------------------------------------------
+    # RET  (unconditional)
+    # -----------------------------------------------------------------------
+
+    def test_ret_unconditional(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFD
+        cpu._write16(0xFFFD, 0x1234)
+        load_prog(cpu, [0xC9])
+        cycles = cpu.step()
+        assert cpu.PC == 0x1234
+        assert cpu.SP == 0xFFFF
+        assert cycles == 10
+
+    def test_call_ret_roundtrip(self):
+        # CALL to subroutine, subroutine does RET, PC back at next instruction
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        # 0x0000: CALL 0x0100
+        # 0x0100: RET
+        load_prog(cpu, [0xCD, 0x00, 0x01])   # CALL 0x0100
+        cpu.bus.mem[0x0100] = 0xC9            # RET
+        cpu.step()   # CALL
+        cpu.step()   # RET
+        assert cpu.PC == 0x0003
+        assert cpu.SP == 0xFFFF
+
+    # -----------------------------------------------------------------------
+    # RET cc
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,flag_name,flag_for_taken", [
+        (0xC0, 'Z',  False),   # RET NZ
+        (0xC8, 'Z',  True),    # RET Z
+        (0xD0, 'C',  False),   # RET NC
+        (0xD8, 'C',  True),    # RET C
+        (0xE0, 'PV', False),   # RET PO
+        (0xE8, 'PV', True),    # RET PE
+        (0xF0, 'S',  False),   # RET P
+        (0xF8, 'S',  True),    # RET M
+    ])
+    def test_ret_cc_taken(self, opcode, flag_name, flag_for_taken):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFD
+        cpu._write16(0xFFFD, 0x5000)
+        set_flags(cpu, **{flag_name: flag_for_taken})
+        load_prog(cpu, [opcode])
+        cycles = cpu.step()
+        assert cpu.PC == 0x5000
+        assert cpu.SP == 0xFFFF
+        assert cycles == 11
+
+    @pytest.mark.parametrize("opcode,flag_name,flag_for_taken", [
+        (0xC0, 'Z',  False),
+        (0xC8, 'Z',  True),
+        (0xD0, 'C',  False),
+        (0xD8, 'C',  True),
+        (0xE0, 'PV', False),
+        (0xE8, 'PV', True),
+        (0xF0, 'S',  False),
+        (0xF8, 'S',  True),
+    ])
+    def test_ret_cc_not_taken(self, opcode, flag_name, flag_for_taken):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFD
+        cpu.PC = 0x0000
+        set_flags(cpu, **{flag_name: not flag_for_taken})
+        load_prog(cpu, [opcode])
+        cycles = cpu.step()
+        assert cpu.PC == 0x0001    # past the 1-byte opcode only
+        assert cpu.SP == 0xFFFD   # stack untouched
+        assert cycles == 5
+
+    # -----------------------------------------------------------------------
+    # RST vectors
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,vector", [
+        (0xC7, 0x0000), (0xCF, 0x0008), (0xD7, 0x0010), (0xDF, 0x0018),
+        (0xE7, 0x0020), (0xEF, 0x0028), (0xF7, 0x0030), (0xFF, 0x0038),
+    ])
+    def test_rst_vectors(self, opcode, vector):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        load_prog(cpu, [opcode])
+        cycles = cpu.step()
+        assert cpu.PC == vector
+        assert cycles == 11
+
+    def test_rst_pushes_return_address(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        load_prog(cpu, [0xCF], origin=0x0200)   # RST 08H at 0x0200
+        cpu.step()
+        assert cpu._read16(cpu.SP) == 0x0201    # byte after RST
+
+    # -----------------------------------------------------------------------
+    # DJNZ
+    # -----------------------------------------------------------------------
+
+    def test_djnz_taken(self):
+        cpu = make_cpu()
+        cpu.B = 0x02
+        load_prog(cpu, [0x10, 0xFE])   # DJNZ -2 → loops back to itself
+        cycles = cpu.step()
+        assert cpu.B == 0x01
+        assert cpu.PC == 0x0000   # jumped back: 2 + (-2) = 0
+        assert cycles == 13
+
+    def test_djnz_falls_through(self):
+        cpu = make_cpu()
+        cpu.B = 0x01
+        load_prog(cpu, [0x10, 0x10])   # DJNZ +16
+        cycles = cpu.step()
+        assert cpu.B == 0x00
+        assert cpu.PC == 0x0002   # past opcode + offset, no jump
+        assert cycles == 8
+
+    def test_djnz_loop_count(self):
+        # Run DJNZ until B reaches 0; verify correct number of iterations
+        cpu = make_cpu()
+        cpu.B = 5
+        load_prog(cpu, [0x10, 0xFE])   # DJNZ to itself
+        for _ in range(4):
+            cpu.step()                  # taken 4 times
+        cpu.step()                      # 5th: B→0, falls through
+        assert cpu.B == 0x00
+        assert cpu.PC == 0x0002
+
+    # -----------------------------------------------------------------------
+    # SCF / CCF
+    # -----------------------------------------------------------------------
+
+    def test_scf(self):
+        cpu = make_cpu()
+        set_flags(cpu, S=True, Z=True, PV=True, H=True, N=True, C=False)
+        load_prog(cpu, [0x37])
+        cycles = cpu.step()
+        assert flag(cpu, 'C')
+        assert not flag(cpu, 'H')
+        assert not flag(cpu, 'N')
+        assert flag(cpu, 'S')    # preserved
+        assert flag(cpu, 'Z')    # preserved
+        assert flag(cpu, 'PV')   # preserved
+        assert cycles == 4
+
+    def test_ccf_flips_carry_set_to_clear(self):
+        cpu = make_cpu()
+        set_flags(cpu, C=True, H=False)
+        load_prog(cpu, [0x3F])
+        cycles = cpu.step()
+        assert not flag(cpu, 'C')
+        assert flag(cpu, 'H')    # old C copied to H
+        assert not flag(cpu, 'N')
+        assert cycles == 4
+
+    def test_ccf_flips_carry_clear_to_set(self):
+        cpu = make_cpu()
+        set_flags(cpu, C=False, H=True)
+        load_prog(cpu, [0x3F])
+        cpu.step()
+        assert flag(cpu, 'C')
+        assert not flag(cpu, 'H')   # old C (0) → H
+
+
+class TestStack:
+    """PUSH / POP for all four register pairs."""
+
+    @pytest.mark.parametrize("push_op,pop_op,reg_attr,val", [
+        (0xC5, 0xC1, 'BC', 0x1234),
+        (0xD5, 0xD1, 'DE', 0x5678),
+        (0xE5, 0xE1, 'HL', 0x9ABC),
+        (0xF5, 0xF1, 'AF', 0xDEF0),
+    ])
+    def test_push_pop_roundtrip(self, push_op, pop_op, reg_attr, val):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        setattr(cpu, reg_attr, val)
+        load_prog(cpu, [push_op, pop_op])
+        cpu.step()   # PUSH
+        cpu.step()   # POP
+        assert getattr(cpu, reg_attr) == val
+        assert cpu.SP == 0xFFFF
+
+    @pytest.mark.parametrize("push_op,reg_attr,val", [
+        (0xC5, 'BC', 0x1234),
+        (0xD5, 'DE', 0x5678),
+        (0xE5, 'HL', 0x9ABC),
+        (0xF5, 'AF', 0xDEF0),
+    ])
+    def test_push_decrements_sp(self, push_op, reg_attr, val):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        setattr(cpu, reg_attr, val)
+        load_prog(cpu, [push_op])
+        cycles = cpu.step()
+        assert cpu.SP == 0xFFFD
+        assert cycles == 11
+
+    @pytest.mark.parametrize("pop_op,reg_attr", [
+        (0xC1, 'BC'), (0xD1, 'DE'), (0xE1, 'HL'), (0xF1, 'AF'),
+    ])
+    def test_pop_increments_sp(self, pop_op, reg_attr):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFD
+        cpu._write16(0xFFFD, 0xBEEF)
+        load_prog(cpu, [pop_op])
+        cycles = cpu.step()
+        assert cpu.SP == 0xFFFF
+        assert getattr(cpu, reg_attr) == 0xBEEF
+        assert cycles == 10
+
+    def test_push_stores_hi_then_lo(self):
+        # PUSH stores high byte at SP-1 and low byte at SP-2
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.BC = 0xABCD
+        load_prog(cpu, [0xC5])
+        cpu.step()
+        assert cpu.bus.mem[0xFFFE] == 0xAB   # high byte
+        assert cpu.bus.mem[0xFFFD] == 0xCD   # low byte
+
+    def test_stack_lifo(self):
+        # PUSH BC then PUSH DE; POP gives DE first, then BC
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.BC = 0x1111
+        cpu.DE = 0x2222
+        load_prog(cpu, [0xC5, 0xD5, 0xD1, 0xC1])
+        cpu.step()   # PUSH BC
+        cpu.step()   # PUSH DE
+        cpu.step()   # POP DE  (gets 0x2222 back)
+        cpu.step()   # POP BC  (gets 0x1111 back)
+        assert cpu.DE == 0x2222
+        assert cpu.BC == 0x1111
+
+
+class TestExchange:
+    """EX AF,AF' / EXX / EX DE,HL / EX (SP),HL."""
+
+    def test_ex_af_af_prime(self):
+        cpu = make_cpu()
+        cpu.A = 0x12; cpu.F = 0x34
+        cpu.A_ = 0x56; cpu.F_ = 0x78
+        load_prog(cpu, [0x08])
+        cycles = cpu.step()
+        assert cpu.A == 0x56 and cpu.F == 0x78
+        assert cpu.A_ == 0x12 and cpu.F_ == 0x34
+        assert cycles == 4
+
+    def test_ex_af_af_prime_twice_restores(self):
+        cpu = make_cpu()
+        cpu.A = 0xAA; cpu.F = 0xBB
+        load_prog(cpu, [0x08, 0x08])
+        cpu.step(); cpu.step()
+        assert cpu.A == 0xAA and cpu.F == 0xBB
+
+    def test_exx(self):
+        cpu = make_cpu()
+        cpu.BC = 0x1111; cpu.DE = 0x2222; cpu.HL = 0x3333
+        cpu.B_ = 0xAA; cpu.C_ = 0xBB
+        cpu.D_ = 0xCC; cpu.E_ = 0xDD
+        cpu.H_ = 0xEE; cpu.L_ = 0xFF
+        load_prog(cpu, [0xD9])
+        cycles = cpu.step()
+        assert cpu.BC == 0xAABB
+        assert cpu.DE == 0xCCDD
+        assert cpu.HL == 0xEEFF
+        assert cpu.B_ == 0x11 and cpu.C_ == 0x11
+        assert cycles == 4
+
+    def test_exx_twice_restores(self):
+        cpu = make_cpu()
+        cpu.BC = 0x1234
+        load_prog(cpu, [0xD9, 0xD9])
+        cpu.step(); cpu.step()
+        assert cpu.BC == 0x1234
+
+    def test_ex_de_hl(self):
+        cpu = make_cpu()
+        cpu.DE = 0xDEAD; cpu.HL = 0xBEEF
+        load_prog(cpu, [0xEB])
+        cycles = cpu.step()
+        assert cpu.DE == 0xBEEF
+        assert cpu.HL == 0xDEAD
+        assert cycles == 4
+
+    def test_ex_sp_hl(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFD
+        cpu._write16(0xFFFD, 0xABCD)
+        cpu.HL = 0x1234
+        load_prog(cpu, [0xE3])
+        cycles = cpu.step()
+        assert cpu.HL == 0xABCD          # HL gets old stack top
+        assert cpu._read16(0xFFFD) == 0x1234  # stack gets old HL
+        assert cpu.SP == 0xFFFD          # SP itself unchanged
+        assert cycles == 19
+
+    def test_ex_sp_hl_roundtrip(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFD
+        cpu._write16(0xFFFD, 0x5678)
+        cpu.HL = 0x1234
+        load_prog(cpu, [0xE3, 0xE3])
+        cpu.step(); cpu.step()
+        assert cpu.HL == 0x1234   # back to original
+        assert cpu._read16(0xFFFD) == 0x5678
