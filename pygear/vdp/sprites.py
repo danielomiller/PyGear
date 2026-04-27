@@ -1,4 +1,4 @@
-"""Game Gear / SMS VDP sprite subsystem — SAT parsing and per-line collection.
+"""Game Gear / SMS VDP sprite subsystem — SAT parsing, line collection, rendering.
 
 Sprite Attribute Table (SAT)
 -----------------------------
@@ -26,6 +26,17 @@ Heights and zoom
 Scanline limit
   At most 8 sprites per scanline are returned; if a 9th would match, the
   overflow flag is set and collection stops.
+
+Sprite tile pattern base
+  (R6 & 0x04) << 11  → 0x0000 or 0x2000.
+
+Palette
+  Sprites always use palette 1 (CRAM entries 16–31).
+  Color index 0 is transparent.
+
+Collision
+  Set when two non-transparent sprite pixels share the same screen X.
+  Detected across all sprites on the line regardless of draw order.
 """
 
 SPRITE_LIMIT = 8
@@ -89,3 +100,79 @@ def sprites_on_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
         visible.append((x, tile_num, dy))
 
     return visible, overflow
+
+
+def render_sprite_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
+    """Render all sprites visible on *line*.
+
+    Returns (pixels, overflow, collision).
+
+    pixels
+      List of 256 (cram_index, has_pixel) tuples.  has_pixel is False for
+      transparent positions (color index 0 or no sprite).  cram_index is
+      in the range 16–31 (palette 1) when has_pixel is True, 0 otherwise.
+
+    overflow
+      True when more than 8 sprites were visible on this line.
+
+    collision
+      True when two non-transparent sprite pixels share the same screen X.
+
+    Tile row selection (tall + zoom)
+      actual_row = dy >> 1  if zoom else dy          (range 0–7 or 0–15)
+      In tall mode: actual_row < 8 → upper tile (tile_num & ~1, tile_row = actual_row)
+                    actual_row ≥ 8 → lower tile (tile_num | 1,  tile_row = actual_row − 8)
+
+    Zoom X
+      Each of the 8 tile pixel columns occupies 2 consecutive screen columns.
+    """
+    tall      = bool(regs[1] & 0x02)
+    zoom      = bool(regs[1] & 0x01)
+    tile_base = (regs[6] & 0x04) << 11
+
+    visible, overflow = sprites_on_line(vram, regs, line)
+
+    pixels    = [(0, False)] * 256
+    collision = False
+
+    for x, tile_num, dy in visible:
+        # Which row within the tile(s) are we on?
+        actual_row = dy >> 1 if zoom else dy
+        if tall and actual_row >= 8:
+            tile_num = tile_num | 1       # lower tile of the pair
+            tile_row = actual_row - 8
+        else:
+            tile_row = actual_row
+
+        # Read the four bitplane bytes for this tile row
+        addr = (tile_base + tile_num * 32 + tile_row * 4) & 0x3FFF
+        b0 = vram[addr]
+        b1 = vram[(addr + 1) & 0x3FFF]
+        b2 = vram[(addr + 2) & 0x3FFF]
+        b3 = vram[(addr + 3) & 0x3FFF]
+
+        # Decode and plot each of the 8 tile columns
+        for col in range(8):
+            shift = 7 - col
+            color_idx = (
+                 ((b0 >> shift) & 1)
+                | ((b1 >> shift) & 1) << 1
+                | ((b2 >> shift) & 1) << 2
+                | ((b3 >> shift) & 1) << 3
+            )
+            if color_idx == 0:
+                continue          # transparent
+
+            cram_idx = color_idx + 16     # always palette 1
+
+            # Each column covers 1 screen pixel (or 2 with zoom)
+            sx0 = x + col * (2 if zoom else 1)
+            for sx in range(sx0, sx0 + (2 if zoom else 1)):
+                if sx < 0 or sx > 255:
+                    continue
+                if pixels[sx][1]:         # another sprite already drew here
+                    collision = True
+                else:
+                    pixels[sx] = (cram_idx, True)
+
+    return pixels, overflow, collision
