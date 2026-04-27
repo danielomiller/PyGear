@@ -2,11 +2,12 @@
 
 Structure
 ---------
-TestVDPPorts  — control/data port I/O, VRAM, CRAM, registers, address latch,
-                auto-increment, status clear-on-read, V/H counters.
+TestVDPPorts    — control/data port I/O, VRAM, CRAM, registers, address latch,
+                  auto-increment, status clear-on-read, V/H counters.
+TestTileDecoder — 4bpp planar tile decode, hflip, vflip.
 
-More test classes will be added in subsequent tasks (tile decoder, background
-renderer, timing/interrupts).
+More test classes will be added in subsequent tasks (background renderer,
+timing/interrupts).
 """
 
 import sys
@@ -15,7 +16,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pygear.vdp.vdp import VDP, VRAM_SIZE, CRAM_SIZE, NUM_REGS
+from pygear.vdp.vdp   import VDP, VRAM_SIZE, CRAM_SIZE, NUM_REGS
+from pygear.vdp.tiles import decode_tile, TILE_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -354,3 +356,239 @@ class TestVDPPorts:
         vdp = make_vdp()
         assert vdp.port_read(0x00) == 0xFF
         assert vdp.port_read(0xC0) == 0xFF
+
+
+# ---------------------------------------------------------------------------
+# Helper — build a 32-byte tile in a fresh bytearray
+# ---------------------------------------------------------------------------
+
+def make_vram(tile_data: dict = None) -> bytearray:
+    """Return a 16 KB VRAM; *tile_data* maps (tile_num, row) → (b0,b1,b2,b3)."""
+    vram = bytearray(VRAM_SIZE)
+    if tile_data:
+        for (tile_num, row), (b0, b1, b2, b3) in tile_data.items():
+            off = tile_num * TILE_BYTES + row * 4
+            vram[off], vram[off+1], vram[off+2], vram[off+3] = b0, b1, b2, b3
+    return vram
+
+
+class TestTileDecoder:
+    # -----------------------------------------------------------------------
+    # Output shape
+    # -----------------------------------------------------------------------
+
+    def test_returns_8_rows(self):
+        vram = make_vram()
+        tile = decode_tile(vram, 0)
+        assert len(tile) == 8
+
+    def test_each_row_has_8_pixels(self):
+        vram = make_vram()
+        tile = decode_tile(vram, 0)
+        for row in tile:
+            assert len(row) == 8
+
+    # -----------------------------------------------------------------------
+    # Colour index decoding
+    # -----------------------------------------------------------------------
+
+    def test_blank_tile_all_color_0(self):
+        vram = make_vram()
+        tile = decode_tile(vram, 0)
+        assert all(px == 0 for row in tile for px in row)
+
+    def test_plane0_only_gives_color_1(self):
+        # All bits of plane 0 set in row 0 → all pixels have colour index 1
+        vram = make_vram({(0, 0): (0xFF, 0x00, 0x00, 0x00)})
+        tile = decode_tile(vram, 0)
+        assert tile[0] == [1] * 8
+        assert tile[1] == [0] * 8   # other rows untouched
+
+    def test_plane1_only_gives_color_2(self):
+        vram = make_vram({(0, 0): (0x00, 0xFF, 0x00, 0x00)})
+        tile = decode_tile(vram, 0)
+        assert tile[0] == [2] * 8
+
+    def test_plane2_only_gives_color_4(self):
+        vram = make_vram({(0, 0): (0x00, 0x00, 0xFF, 0x00)})
+        tile = decode_tile(vram, 0)
+        assert tile[0] == [4] * 8
+
+    def test_plane3_only_gives_color_8(self):
+        vram = make_vram({(0, 0): (0x00, 0x00, 0x00, 0xFF)})
+        tile = decode_tile(vram, 0)
+        assert tile[0] == [8] * 8
+
+    def test_all_planes_set_gives_color_15(self):
+        vram = make_vram({(0, 0): (0xFF, 0xFF, 0xFF, 0xFF)})
+        tile = decode_tile(vram, 0)
+        assert tile[0] == [15] * 8
+
+    def test_combined_planes_give_correct_index(self):
+        # planes 0+2 set → colour index 5  (0b0101)
+        vram = make_vram({(0, 0): (0xFF, 0x00, 0xFF, 0x00)})
+        tile = decode_tile(vram, 0)
+        assert tile[0] == [5] * 8
+
+    # -----------------------------------------------------------------------
+    # Bit/pixel ordering
+    # -----------------------------------------------------------------------
+
+    def test_bit7_maps_to_column_0(self):
+        # Plane 0 byte 0x80 (only bit 7 set) → only pixel 0 has colour 1
+        vram = make_vram({(0, 0): (0x80, 0x00, 0x00, 0x00)})
+        tile = decode_tile(vram, 0)
+        assert tile[0][0] == 1
+        assert tile[0][1:] == [0] * 7
+
+    def test_bit0_maps_to_column_7(self):
+        # Plane 0 byte 0x01 (only bit 0 set) → only pixel 7 has colour 1
+        vram = make_vram({(0, 0): (0x01, 0x00, 0x00, 0x00)})
+        tile = decode_tile(vram, 0)
+        assert tile[0][7] == 1
+        assert tile[0][:7] == [0] * 7
+
+    def test_each_bit_position_selects_correct_column(self):
+        # Set only plane 0; one bit at a time — confirms all 8 column positions
+        for bit in range(8):
+            col = 7 - bit
+            byte = 1 << bit
+            vram = make_vram({(0, 0): (byte, 0x00, 0x00, 0x00)})
+            tile = decode_tile(vram, 0)
+            assert tile[0][col] == 1, f"bit {bit} should light column {col}"
+            others = [tile[0][c] for c in range(8) if c != col]
+            assert others == [0] * 7, f"only column {col} should be lit"
+
+    def test_independent_planes_per_pixel(self):
+        # One pixel per plane, each at a different column
+        # plane0 bit7 → col0=1; plane1 bit6 → col1=2;
+        # plane2 bit5 → col2=4; plane3 bit4 → col3=8
+        vram = make_vram({(0, 0): (0x80, 0x40, 0x20, 0x10)})
+        tile = decode_tile(vram, 0)
+        assert tile[0][:4] == [1, 2, 4, 8]
+        assert tile[0][4:] == [0, 0, 0, 0]
+
+    # -----------------------------------------------------------------------
+    # Multiple rows
+    # -----------------------------------------------------------------------
+
+    def test_each_row_decoded_independently(self):
+        # Row 0: all planes 0xFF (colour 15); rows 1-7: blank
+        vram = make_vram({(0, 0): (0xFF, 0xFF, 0xFF, 0xFF)})
+        tile = decode_tile(vram, 0)
+        assert tile[0] == [15] * 8
+        for r in range(1, 8):
+            assert tile[r] == [0] * 8
+
+    def test_all_rows_decodable(self):
+        # Write a distinct value in plane 0 of every row of tile 0
+        td = {}
+        for row in range(8):
+            td[(0, row)] = (1 << row, 0x00, 0x00, 0x00)
+        vram = make_vram(td)
+        tile = decode_tile(vram, 0)
+        for row in range(8):
+            # Only the pixel at column (7 - row) should be lit
+            lit_col = 7 - row
+            assert tile[row][lit_col] == 1
+            assert sum(tile[row]) == 1
+
+    # -----------------------------------------------------------------------
+    # Tile number → VRAM offset
+    # -----------------------------------------------------------------------
+
+    def test_tile_0_starts_at_byte_0(self):
+        vram = bytearray(VRAM_SIZE)
+        vram[0] = 0xFF   # plane 0, row 0 of tile 0
+        tile = decode_tile(vram, 0)
+        assert tile[0] == [1] * 8
+
+    def test_tile_1_starts_at_byte_32(self):
+        vram = bytearray(VRAM_SIZE)
+        vram[32] = 0xFF  # plane 0, row 0 of tile 1
+        tile0 = decode_tile(vram, 0)
+        tile1 = decode_tile(vram, 1)
+        assert tile0[0] == [0] * 8   # tile 0 unaffected
+        assert tile1[0] == [1] * 8
+
+    def test_tile_n_starts_at_byte_n_times_32(self):
+        vram = bytearray(VRAM_SIZE)
+        for tile_num in (0, 1, 7, 64, 255, 511):
+            off = tile_num * TILE_BYTES
+            vram[off] = 0xFF
+        for tile_num in (0, 1, 7, 64, 255, 511):
+            tile = decode_tile(vram, tile_num)
+            assert tile[0] == [1] * 8, f"tile {tile_num}"
+
+    # -----------------------------------------------------------------------
+    # Horizontal flip
+    # -----------------------------------------------------------------------
+
+    def test_hflip_reverses_pixel_order(self):
+        # Pixel 0 lit before flip → pixel 7 lit after flip
+        vram = make_vram({(0, 0): (0x80, 0x00, 0x00, 0x00)})   # bit7 → col0
+        tile = decode_tile(vram, 0, hflip=True)
+        assert tile[0][7] == 1
+        assert tile[0][:7] == [0] * 7
+
+    def test_hflip_all_rows_mirrored(self):
+        # Ascending pattern across a row: col0=1, col7=0 → after hflip col0=0, col7=1
+        vram = make_vram({(0, 3): (0xFE, 0x00, 0x00, 0x00)})   # pixels 0-6 lit, 7 dark
+        tile_normal = decode_tile(vram, 0)
+        tile_hflip  = decode_tile(vram, 0, hflip=True)
+        assert tile_normal[3] == tile_hflip[3][::-1]
+
+    def test_hflip_does_not_affect_row_order(self):
+        # Row 0 pattern, rows 1-7 blank; hflip only affects columns
+        vram = make_vram({(0, 0): (0xFF, 0xFF, 0xFF, 0xFF)})
+        tile = decode_tile(vram, 0, hflip=True)
+        assert tile[0] == [15] * 8
+        for r in range(1, 8):
+            assert tile[r] == [0] * 8
+
+    # -----------------------------------------------------------------------
+    # Vertical flip
+    # -----------------------------------------------------------------------
+
+    def test_vflip_reverses_row_order(self):
+        # Only row 0 has data; after vflip it should appear at row 7
+        vram = make_vram({(0, 0): (0xFF, 0x00, 0x00, 0x00)})
+        tile = decode_tile(vram, 0, vflip=True)
+        assert tile[7] == [1] * 8
+        for r in range(7):
+            assert tile[r] == [0] * 8
+
+    def test_vflip_all_rows_mirrored(self):
+        td = {(0, r): (1 << r, 0, 0, 0) for r in range(8)}
+        vram = make_vram(td)
+        normal = decode_tile(vram, 0)
+        flipped = decode_tile(vram, 0, vflip=True)
+        assert flipped == normal[::-1]
+
+    def test_vflip_does_not_affect_pixel_order(self):
+        # Pixel 0 of row 0 = colour 1; after vflip pixel 0 of row 7 = colour 1
+        vram = make_vram({(0, 0): (0x80, 0x00, 0x00, 0x00)})
+        tile = decode_tile(vram, 0, vflip=True)
+        assert tile[7][0] == 1   # column unchanged
+        assert tile[7][1:] == [0] * 7
+
+    # -----------------------------------------------------------------------
+    # Both flips combined
+    # -----------------------------------------------------------------------
+
+    def test_hflip_vflip_combined(self):
+        # Original: row 0 only, pixel 0 only (colour 1)
+        # hflip+vflip → should appear at row 7, pixel 7
+        vram = make_vram({(0, 0): (0x80, 0x00, 0x00, 0x00)})
+        tile = decode_tile(vram, 0, hflip=True, vflip=True)
+        assert tile[7][7] == 1
+        assert sum(px for row in tile for px in row) == 1
+
+    def test_hflip_vflip_is_180_rotation(self):
+        # hflip + vflip = 180° rotation of the tile
+        td = {(0, r): (1 << r, 0, 0, 0) for r in range(8)}
+        vram = make_vram(td)
+        normal   = decode_tile(vram, 0)
+        rotated  = decode_tile(vram, 0, hflip=True, vflip=True)
+        expected = [row[::-1] for row in normal[::-1]]
+        assert rotated == expected
