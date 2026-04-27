@@ -157,3 +157,97 @@ class VDP:
         else:                        # VRAM write (codes 00, 01)
             self.vram[self._addr & 0x3FFF] = value
         self._addr = (self._addr + 1) & 0x3FFF
+
+    # ------------------------------------------------------------------
+    # Background scanline renderer
+    # ------------------------------------------------------------------
+    def render_line(self, line: int) -> list:
+        """Render 256 pixels of the background layer for *line*.
+
+        Returns a list of 256 (cram_index, priority) tuples.
+        cram_index is 0–31 (colour index 0–15 plus palette offset 0 or 16).
+        priority is True when the name-table entry has bit 12 set.
+
+        Name table
+        ----------
+        Base address = (R2 & 0x0E) << 10.  32 columns × 28 rows, 2 bytes per
+        entry (little-endian):
+          bits  8–0  tile number (0–511)
+          bit   9    horizontal flip
+          bit  10    vertical flip
+          bit  11    palette (0 → CRAM 0–15, 1 → CRAM 16–31)
+          bit  12    priority
+
+        Scroll
+        ------
+        H-scroll (R8): bg_x = (screen_x + R8) & 0xFF
+        V-scroll (R9): bg_y = (line    + R9) % 224  (wraps at 28 tile rows)
+
+        Scroll locks (R0)
+        -----------------
+        bit 6  H-scroll lock: top 16 lines (line < 16) ignore R8
+        bit 7  V-scroll lock: right 8 columns (screen_x >= 192) ignore R9
+        """
+        r0        = self.regs[0]
+        h_scroll  = self.regs[8]
+        v_scroll  = self.regs[9]
+        name_base = (self.regs[2] & 0x0E) << 10
+
+        hscroll_lock = bool(r0 & 0x40)
+        vscroll_lock = bool(r0 & 0x80)
+
+        eff_h = 0 if (hscroll_lock and line < 16) else h_scroll
+
+        # Scrolled vertical position (wraps at 224 = 28 × 8)
+        bg_y      = (line + v_scroll) % 224
+        tile_row  = bg_y >> 3
+        pixel_row = bg_y & 7
+
+        # Unscrolled vertical position (used by V-scroll-locked columns)
+        ly_lock     = line % 224
+        tile_row_l  = ly_lock >> 3
+        prow_l      = ly_lock & 7
+
+        vram   = self.vram
+        result = []
+
+        for screen_x in range(256):
+            if vscroll_lock and screen_x >= 192:
+                tr = tile_row_l
+                pr = prow_l
+            else:
+                tr = tile_row
+                pr = pixel_row
+
+            bg_x      = (screen_x + eff_h) & 0xFF
+            tile_col  = bg_x >> 3
+            pixel_col = bg_x & 7
+
+            # Read 2-byte name-table entry (little-endian)
+            nt_off = name_base + (tr * 32 + tile_col) * 2
+            lo     = vram[nt_off       & 0x3FFF]
+            hi     = vram[(nt_off + 1) & 0x3FFF]
+            entry  = lo | (hi << 8)
+
+            tile_num = entry & 0x1FF
+            hflip    = bool(entry & 0x0200)
+            vflip    = bool(entry & 0x0400)
+            palette  = (entry >> 11) & 1
+            priority = bool(entry & 0x1000)
+
+            # Pixel row and column inside tile (apply flips)
+            row   = (7 - pr)        if vflip else pr
+            col   = (7 - pixel_col) if hflip else pixel_col
+            shift = 7 - col
+            base  = tile_num * 32 + row * 4
+
+            color_idx = (
+                 ((vram[base    ] >> shift) & 1)
+                | ((vram[base + 1] >> shift) & 1) << 1
+                | ((vram[base + 2] >> shift) & 1) << 2
+                | ((vram[base + 3] >> shift) & 1) << 3
+            )
+
+            result.append((color_idx + palette * 16, priority))
+
+        return result
