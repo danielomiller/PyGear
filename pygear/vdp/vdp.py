@@ -251,3 +251,26 @@ class VDP:
             result.append((color_idx + palette * 16, priority))
 
         return result
+
+    # ------------------------------------------------------------------
+    # CRAM colour decode
+    # ------------------------------------------------------------------
+    def cram_color(self, index: int) -> tuple:
+        """Decode CRAM entry *index* (0–31) to an (R, G, B) tuple (0–255 each).
+
+        Game Gear CRAM format — 2 bytes per entry, little-endian:
+          bits  3–0   Red   (4-bit)
+          bits  7–4   Green (4-bit)
+          bits 11–8   Blue  (4-bit)
+          bits 15–12  unused
+
+        Each 4-bit channel is scaled to 8-bit by multiplying by 17
+        (0x0→0, 0xF→255, linear).
+        """
+        lo   = self.cram[index * 2]
+        hi   = self.cram[index * 2 + 1]
+        word = lo | (hi << 8)
+        r = ((word >> 0) & 0xF) * 17
+        g = ((word >> 4) & 0xF) * 17
+        b = ((word >> 8) & 0xF) * 17
+        return (r, g, b)

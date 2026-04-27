@@ -952,3 +952,193 @@ class TestBackground:
         vdp.regs[0] = 0x80
         # Screen x=0, line 0 → bg_y = 0+8 = 8 → tile row 1, col 0 → tile 1 → color 4
         assert vdp.render_line(0)[0][0] == 4
+
+
+# ---------------------------------------------------------------------------
+# CRAM colour decode helpers
+# ---------------------------------------------------------------------------
+
+def write_cram_color(vdp: VDP, index: int, r4: int, g4: int, b4: int) -> None:
+    """Write a 12-bit BGR Game Gear colour to CRAM entry *index* (0–31)."""
+    word = (r4 & 0xF) | ((g4 & 0xF) << 4) | ((b4 & 0xF) << 8)
+    vdp.cram[index * 2]     = word & 0xFF
+    vdp.cram[index * 2 + 1] = (word >> 8) & 0xFF
+
+
+class TestCRAMColor:
+    # -----------------------------------------------------------------------
+    # Return type and shape
+    # -----------------------------------------------------------------------
+
+    def test_returns_tuple_of_three(self):
+        vdp = make_vdp()
+        result = vdp.cram_color(0)
+        assert isinstance(result, tuple) and len(result) == 3
+
+    def test_all_components_are_ints(self):
+        vdp = make_vdp()
+        r, g, b = vdp.cram_color(0)
+        assert isinstance(r, int) and isinstance(g, int) and isinstance(b, int)
+
+    # -----------------------------------------------------------------------
+    # Black and white
+    # -----------------------------------------------------------------------
+
+    def test_all_zeros_gives_black(self):
+        vdp = make_vdp()
+        assert vdp.cram_color(0) == (0, 0, 0)
+
+    def test_all_channels_max_gives_white(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, 0xF, 0xF, 0xF)
+        assert vdp.cram_color(0) == (255, 255, 255)
+
+    # -----------------------------------------------------------------------
+    # Channel isolation
+    # -----------------------------------------------------------------------
+
+    def test_red_only(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=0xF, g4=0, b4=0)
+        assert vdp.cram_color(0) == (255, 0, 0)
+
+    def test_green_only(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=0, g4=0xF, b4=0)
+        assert vdp.cram_color(0) == (0, 255, 0)
+
+    def test_blue_only(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=0, g4=0, b4=0xF)
+        assert vdp.cram_color(0) == (0, 0, 255)
+
+    def test_red_does_not_bleed_into_green_or_blue(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=0xF, g4=0, b4=0)
+        _, g, b = vdp.cram_color(0)
+        assert g == 0 and b == 0
+
+    def test_green_does_not_bleed_into_red_or_blue(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=0, g4=0xF, b4=0)
+        r, _, b = vdp.cram_color(0)
+        assert r == 0 and b == 0
+
+    def test_blue_does_not_bleed_into_red_or_green(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=0, g4=0, b4=0xF)
+        r, g, _ = vdp.cram_color(0)
+        assert r == 0 and g == 0
+
+    # -----------------------------------------------------------------------
+    # 4-bit to 8-bit scaling (v * 17)
+    # -----------------------------------------------------------------------
+
+    def test_scaling_zero(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, 0, 0, 0)
+        assert vdp.cram_color(0) == (0, 0, 0)
+
+    def test_scaling_one(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=1, g4=0, b4=0)
+        r, _, _ = vdp.cram_color(0)
+        assert r == 17
+
+    def test_scaling_eight(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=8, g4=0, b4=0)
+        r, _, _ = vdp.cram_color(0)
+        assert r == 136   # 8 * 17
+
+    def test_scaling_fifteen(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=0xF, g4=0, b4=0)
+        r, _, _ = vdp.cram_color(0)
+        assert r == 255   # 15 * 17
+
+    def test_scaling_all_4bit_values(self):
+        vdp = make_vdp()
+        for v in range(16):
+            write_cram_color(vdp, 0, r4=v, g4=0, b4=0)
+            r, _, _ = vdp.cram_color(0)
+            assert r == v * 17, f"v={v}: expected {v*17}, got {r}"
+
+    # -----------------------------------------------------------------------
+    # High nibble of high byte is ignored
+    # -----------------------------------------------------------------------
+
+    def test_high_nibble_of_hi_byte_ignored(self):
+        # Write 0xF0 into the high byte; bits 15-12 should not affect the result
+        vdp = make_vdp()
+        vdp.cram[0] = 0x00          # r=0, g=0
+        vdp.cram[1] = 0xF0          # upper nibble set, lower nibble (blue) = 0
+        assert vdp.cram_color(0) == (0, 0, 0)
+
+    def test_only_lower_nibble_of_hi_byte_used_for_blue(self):
+        vdp = make_vdp()
+        vdp.cram[0] = 0x00
+        vdp.cram[1] = 0x0F          # lower nibble = blue = 0xF
+        assert vdp.cram_color(0) == (0, 0, 255)
+
+    # -----------------------------------------------------------------------
+    # CRAM index addressing — all 32 entries
+    # -----------------------------------------------------------------------
+
+    def test_palette_0_index_0(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0, r4=1, g4=2, b4=3)
+        assert vdp.cram_color(0) == (17, 34, 51)
+
+    def test_palette_0_index_15(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 15, r4=0xA, g4=0xB, b4=0xC)
+        assert vdp.cram_color(15) == (0xA * 17, 0xB * 17, 0xC * 17)
+
+    def test_palette_1_index_0_is_cram_16(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 16, r4=0xF, g4=0, b4=0)
+        assert vdp.cram_color(16) == (255, 0, 0)
+
+    def test_palette_1_index_15_is_cram_31(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 31, r4=0, g4=0xF, b4=0)
+        assert vdp.cram_color(31) == (0, 255, 0)
+
+    def test_entries_are_independent(self):
+        vdp = make_vdp()
+        write_cram_color(vdp, 0,  r4=1, g4=0, b4=0)
+        write_cram_color(vdp, 1,  r4=0, g4=2, b4=0)
+        write_cram_color(vdp, 31, r4=0, g4=0, b4=3)
+        assert vdp.cram_color(0)  == (17,  0,   0)
+        assert vdp.cram_color(1)  == (0,   34,  0)
+        assert vdp.cram_color(31) == (0,   0,   51)
+
+    def test_all_32_entries_roundtrip(self):
+        # Write a distinct colour to every CRAM entry and read each back
+        vdp = make_vdp()
+        for i in range(32):
+            r4 = i & 0xF
+            g4 = (i * 3) & 0xF
+            b4 = (i * 7) & 0xF
+            write_cram_color(vdp, i, r4, g4, b4)
+        for i in range(32):
+            r4 = i & 0xF
+            g4 = (i * 3) & 0xF
+            b4 = (i * 7) & 0xF
+            assert vdp.cram_color(i) == (r4 * 17, g4 * 17, b4 * 17), f"index {i}"
+
+    # -----------------------------------------------------------------------
+    # Integration — render_line index feeds cram_color
+    # -----------------------------------------------------------------------
+
+    def test_render_then_cram_roundtrip(self):
+        # Tile with colour index 3, palette 1 → CRAM index 19 → write a known RGB
+        vdp = make_bg_vdp()
+        write_solid_tile(vdp, 1, color=3)
+        write_name_entry(vdp, 0, 0, tile_num=1, palette=1)
+        write_cram_color(vdp, 19, r4=0xC, g4=0x3, b4=0x7)
+        line = vdp.render_line(0)
+        cram_idx, _ = line[0]
+        assert cram_idx == 19
+        assert vdp.cram_color(cram_idx) == (0xC * 17, 0x3 * 17, 0x7 * 17)
