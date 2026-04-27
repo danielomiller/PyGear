@@ -1634,3 +1634,204 @@ class TestCB:
         load_prog(cpu, [0xCB, 0xC0])
         cpu.step()
         assert cpu.F == 0b01000101
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — DAA (Decimal Adjust Accumulator)
+# ---------------------------------------------------------------------------
+
+class TestDAA:
+    """
+    DAA (0x27) corrects A after a BCD addition or subtraction.
+
+    After addition (N=0):
+      if H=1 or (A & 0xF) > 9 : A += 6   (low-nibble fix)
+      if C=1 or A > 0x9F       : A += 0x60, C=1  (high-nibble fix)
+
+    After subtraction (N=1):
+      if H=1 : A -= 6
+      if C=1 : A -= 0x60, C=1
+
+    Flags after DAA: S Z computed from result; H computed; PV = parity;
+    N preserved from before; C as above.
+    """
+
+    # shared helpers ---------------------------------------------------------
+
+    def _add_then_daa(self, a: int, b: int):
+        """ADD A, B then DAA. Returns cpu after both steps."""
+        cpu = make_cpu()
+        cpu.A = a
+        cpu.B = b
+        load_prog(cpu, [0x80, 0x27])    # ADD A,B ; DAA
+        cpu.step()                       # ADD
+        cpu.step()                       # DAA
+        return cpu
+
+    def _sub_then_daa(self, a: int, b: int):
+        """SUB B then DAA. Returns cpu after both steps."""
+        cpu = make_cpu()
+        cpu.A = a
+        cpu.B = b
+        load_prog(cpu, [0x90, 0x27])    # SUB B ; DAA
+        cpu.step()                       # SUB
+        cpu.step()                       # DAA
+        return cpu
+
+    # -----------------------------------------------------------------------
+    # After addition (N=0)
+    # -----------------------------------------------------------------------
+
+    def test_daa_add_no_adjust_needed(self):
+        # BCD 04 + 03 = 07 — both nibbles valid, no correction
+        cpu = self._add_then_daa(0x04, 0x03)
+        assert cpu.A == 0x07
+        assert not flag(cpu, 'C')
+        assert not flag(cpu, 'Z')
+        assert not flag(cpu, 'N')
+
+    def test_daa_add_low_nibble_gt9(self):
+        # BCD 07 + 05 = 12 — low nibble 0xC > 9, add 6 to fix
+        cpu = self._add_then_daa(0x07, 0x05)
+        assert cpu.A == 0x12
+        assert not flag(cpu, 'C')
+
+    def test_daa_add_half_carry(self):
+        # BCD 08 + 08 = 16 — half-carry set after ADD, add 6 to fix
+        cpu = self._add_then_daa(0x08, 0x08)
+        assert cpu.A == 0x16
+        assert not flag(cpu, 'C')
+
+    def test_daa_add_upper_digit_overflow(self):
+        # BCD 50 + 60 = 10 (carry) — upper result 0xB0 > 0x9F, add 0x60
+        cpu = self._add_then_daa(0x50, 0x60)
+        assert cpu.A == 0x10
+        assert flag(cpu, 'C')
+
+    def test_daa_add_both_nibbles_overflow(self):
+        # BCD 99 + 01 = 00 (carry) — both corrections applied
+        cpu = self._add_then_daa(0x99, 0x01)
+        assert cpu.A == 0x00
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'Z')
+
+    def test_daa_add_99_plus_99(self):
+        # BCD 99 + 99 = 98 (carry) — maximum BCD addition
+        cpu = self._add_then_daa(0x99, 0x99)
+        assert cpu.A == 0x98
+        assert flag(cpu, 'C')
+
+    def test_daa_add_clears_carry_when_no_overflow(self):
+        # BCD 09 + 09 = 18 — H set, but no upper overflow; C must be clear
+        cpu = self._add_then_daa(0x09, 0x09)
+        assert cpu.A == 0x18
+        assert not flag(cpu, 'C')
+
+    def test_daa_add_preserves_existing_carry(self):
+        # If C was set before DAA (multi-byte addition) it stays set
+        cpu = make_cpu()
+        cpu.A = 0x01
+        cpu.B = 0x00
+        load_prog(cpu, [0x80, 0x27])
+        cpu.step()                       # ADD: C=0 after
+        # manually force C=1 to simulate multi-word carry-in
+        set_flags(cpu, C=True)
+        cpu.step()                       # DAA with C forced on
+        assert flag(cpu, 'C')            # C stays set: 0x01 with C-in → add 0x60
+
+    def test_daa_add_zero_result_sets_z(self):
+        cpu = self._add_then_daa(0x00, 0x00)
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert not flag(cpu, 'S')
+
+    def test_daa_add_sign_flag(self):
+        # BCD result with bit 7 set — but BCD never actually uses > 0x99,
+        # so test via forced A: after 0x50+0x50=0xA0 (before DAA, A=0xA0,
+        # then +0x60 → 0x00 with C). Result 0 → S=0. Instead test 0x40+0x45:
+        # 0x85, no correction → S=1
+        cpu = self._add_then_daa(0x40, 0x45)
+        assert cpu.A == 0x85
+        assert flag(cpu, 'S')
+
+    def test_daa_add_parity_flag(self):
+        # PV = parity of result; 0x12 = 0b00010010 → 2 bits set → even → PV=1
+        cpu = self._add_then_daa(0x07, 0x05)
+        assert cpu.A == 0x12
+        assert flag(cpu, 'PV')          # even parity
+
+    def test_daa_add_n_cleared(self):
+        # N=0 before DAA (after addition), stays 0 after
+        cpu = self._add_then_daa(0x01, 0x01)
+        assert not flag(cpu, 'N')
+
+    def test_daa_add_cycles(self):
+        cpu = make_cpu()
+        cpu.A = 0x05; cpu.B = 0x05
+        load_prog(cpu, [0x80, 0x27])
+        cpu.step()
+        cycles = cpu.step()             # DAA
+        assert cycles == 4
+
+    # -----------------------------------------------------------------------
+    # After subtraction (N=1)
+    # -----------------------------------------------------------------------
+
+    def test_daa_sub_no_adjust_needed(self):
+        # BCD 09 - 04 = 05 — no H, no C, result already valid
+        cpu = self._sub_then_daa(0x09, 0x04)
+        assert cpu.A == 0x05
+        assert not flag(cpu, 'C')
+        assert flag(cpu, 'N')
+
+    def test_daa_sub_half_borrow(self):
+        # BCD 10 - 05 = 05 — borrow from low nibble sets H; subtract 6
+        cpu = self._sub_then_daa(0x10, 0x05)
+        assert cpu.A == 0x05
+        assert not flag(cpu, 'C')
+        assert flag(cpu, 'N')
+
+    def test_daa_sub_borrow_across_decades(self):
+        # BCD 20 - 08 = 12 — H borrow, subtract 6
+        cpu = self._sub_then_daa(0x20, 0x08)
+        assert cpu.A == 0x12
+        assert not flag(cpu, 'C')
+
+    def test_daa_sub_with_carry_borrow(self):
+        # BCD 00 - 01 = 99 (with borrow) — H and C both set after SUB
+        cpu = self._sub_then_daa(0x00, 0x01)
+        assert cpu.A == 0x99
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'N')
+
+    def test_daa_sub_50_minus_30(self):
+        # BCD 50 - 30 = 20 — upper digits only, no nibble correction needed
+        cpu = self._sub_then_daa(0x50, 0x30)
+        assert cpu.A == 0x20
+        assert not flag(cpu, 'C')
+
+    def test_daa_sub_zero_result(self):
+        # BCD 05 - 05 = 00
+        cpu = self._sub_then_daa(0x05, 0x05)
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'N')
+        assert not flag(cpu, 'C')
+
+    def test_daa_sub_99_minus_99(self):
+        # BCD 99 - 99 = 00
+        cpu = self._sub_then_daa(0x99, 0x99)
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert not flag(cpu, 'C')
+
+    def test_daa_sub_preserves_n(self):
+        # N=1 after SUB, must still be 1 after DAA
+        cpu = self._sub_then_daa(0x09, 0x04)
+        assert flag(cpu, 'N')
+
+    def test_daa_sub_parity(self):
+        # 0x05 = 0b00000101 → 2 bits → even parity → PV=1
+        cpu = self._sub_then_daa(0x10, 0x05)
+        assert cpu.A == 0x05
+        assert flag(cpu, 'PV')
