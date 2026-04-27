@@ -2330,3 +2330,439 @@ class TestExchange:
         cpu.step(); cpu.step()
         assert cpu.HL == 0x1234   # back to original
         assert cpu._read16(0xFFFD) == 0x5678
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — Index registers (DD/FD prefix) and DDCB
+# ---------------------------------------------------------------------------
+
+class TestIndexed:
+    """
+    DD-prefixed instructions use IX where unprefixed use HL.
+    FD-prefixed use IY.  _execute_indexed adds +4 T-states for the prefix.
+
+    Cycle totals:
+      LD IX,nn          14  (10+4)    LD IX,(nn)         20  (16+4)
+      LD (IX+d),n       19  (15+4)    LD r,(IX+d)        19  (15+4)
+      LD (IX+d),r       19  (15+4)    INC/DEC (IX+d)     23  (19+4)
+      INC/DEC IX        10  ( 6+4)    ADD IX,rr          15  (11+4)
+      PUSH/POP IX      15/14          JP (IX)             8  ( 4+4)
+      LD SP,IX          10  ( 6+4)
+      DDCB shift/RES/SET 23           DDCB BIT            20
+    """
+
+    # -----------------------------------------------------------------------
+    # LD IX/IY, nn  —  DD/FD 21
+    # -----------------------------------------------------------------------
+
+    def test_ld_ix_nn(self):
+        cpu = make_cpu()
+        load_prog(cpu, [0xDD, 0x21, 0x34, 0x12])   # LD IX, 0x1234
+        cycles = cpu.step()
+        assert cpu.IX == 0x1234
+        assert cycles == 14
+
+    def test_ld_iy_nn(self):
+        cpu = make_cpu()
+        load_prog(cpu, [0xFD, 0x21, 0x78, 0x56])   # LD IY, 0x5678
+        cycles = cpu.step()
+        assert cpu.IY == 0x5678
+        assert cycles == 14
+
+    # -----------------------------------------------------------------------
+    # LD (nn), IX  /  LD IX, (nn)  —  DD 22 / DD 2A
+    # -----------------------------------------------------------------------
+
+    def test_ld_nn_ix(self):
+        cpu = make_cpu()
+        cpu.IX = 0xBEEF
+        load_prog(cpu, [0xDD, 0x22, 0x00, 0xC0])   # LD (0xC000), IX
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC000] == 0xEF          # lo
+        assert cpu.bus.mem[0xC001] == 0xBE          # hi
+        assert cycles == 20
+
+    def test_ld_ix_from_nn(self):
+        cpu = make_cpu()
+        cpu.bus.mem[0xC000] = 0xCD
+        cpu.bus.mem[0xC001] = 0xAB
+        load_prog(cpu, [0xDD, 0x2A, 0x00, 0xC0])   # LD IX, (0xC000)
+        cycles = cpu.step()
+        assert cpu.IX == 0xABCD
+        assert cycles == 20
+
+    # -----------------------------------------------------------------------
+    # INC IX / DEC IX  —  DD 23 / DD 2B
+    # -----------------------------------------------------------------------
+
+    def test_inc_ix(self):
+        cpu = make_cpu()
+        cpu.IX = 0x00FF
+        load_prog(cpu, [0xDD, 0x23])
+        cycles = cpu.step()
+        assert cpu.IX == 0x0100
+        assert cycles == 10
+
+    def test_dec_ix(self):
+        cpu = make_cpu()
+        cpu.IX = 0x0100
+        load_prog(cpu, [0xDD, 0x2B])
+        cycles = cpu.step()
+        assert cpu.IX == 0x00FF
+        assert cycles == 10
+
+    def test_inc_dec_ix_no_flags(self):
+        # 16-bit INC/DEC never touch flags
+        cpu = make_cpu()
+        cpu.IX = 0x0001
+        cpu.F = 0x00
+        load_prog(cpu, [0xDD, 0x2B])    # DEC IX
+        cpu.step()
+        assert cpu.F == 0x00
+
+    # -----------------------------------------------------------------------
+    # LD (IX+d), n  —  DD 36 d n
+    # -----------------------------------------------------------------------
+
+    def test_ld_ix_d_n_positive(self):
+        cpu = make_cpu()
+        cpu.IX = 0xC000
+        load_prog(cpu, [0xDD, 0x36, 0x05, 0xAB])   # LD (IX+5), 0xAB
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC005] == 0xAB
+        assert cycles == 19
+
+    def test_ld_ix_d_n_negative(self):
+        cpu = make_cpu()
+        cpu.IX = 0xC010
+        # displacement -2 → 0xFE as unsigned byte
+        load_prog(cpu, [0xDD, 0x36, 0xFE, 0x77])   # LD (IX-2), 0x77
+        cpu.step()
+        assert cpu.bus.mem[0xC00E] == 0x77
+
+    def test_ld_iy_d_n(self):
+        cpu = make_cpu()
+        cpu.IY = 0xC100
+        load_prog(cpu, [0xFD, 0x36, 0x03, 0x55])   # LD (IY+3), 0x55
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC103] == 0x55
+        assert cycles == 19
+
+    # -----------------------------------------------------------------------
+    # LD r, (IX+d)  —  DD 46/4E/56/5E/66/6E/7E d
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,reg_attr", [
+        (0x46, 'B'), (0x4E, 'C'), (0x56, 'D'), (0x5E, 'E'),
+        (0x66, 'H'), (0x6E, 'L'), (0x7E, 'A'),
+    ])
+    def test_ld_r_ix_d(self, opcode, reg_attr):
+        cpu = make_cpu()
+        cpu.IX = 0xC200
+        cpu.bus.mem[0xC204] = 0x99
+        load_prog(cpu, [0xDD, opcode, 0x04])        # LD r, (IX+4)
+        cycles = cpu.step()
+        assert getattr(cpu, reg_attr) == 0x99
+        assert cycles == 19
+
+    def test_ld_r_iy_d(self):
+        cpu = make_cpu()
+        cpu.IY = 0xC300
+        cpu.bus.mem[0xC302] = 0x42
+        load_prog(cpu, [0xFD, 0x7E, 0x02])          # LD A, (IY+2)
+        cycles = cpu.step()
+        assert cpu.A == 0x42
+        assert cycles == 19
+
+    # -----------------------------------------------------------------------
+    # LD (IX+d), r  —  DD 70–77 d
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,reg_attr,val", [
+        (0x70, 'B', 0x11), (0x71, 'C', 0x22), (0x72, 'D', 0x33),
+        (0x73, 'E', 0x44), (0x77, 'A', 0x66),
+    ])
+    def test_ld_ix_d_r(self, opcode, reg_attr, val):
+        cpu = make_cpu()
+        cpu.IX = 0xC400
+        setattr(cpu, reg_attr, val)
+        load_prog(cpu, [0xDD, opcode, 0x01])        # LD (IX+1), r
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC401] == val
+        assert cycles == 19
+
+    # -----------------------------------------------------------------------
+    # INC (IX+d) / DEC (IX+d)  —  DD 34 d / DD 35 d
+    # -----------------------------------------------------------------------
+
+    def test_inc_ix_d(self):
+        cpu = make_cpu()
+        cpu.IX = 0xC500
+        cpu.bus.mem[0xC502] = 0x09
+        load_prog(cpu, [0xDD, 0x34, 0x02])          # INC (IX+2)
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC502] == 0x0A
+        assert cycles == 23
+
+    def test_dec_ix_d(self):
+        cpu = make_cpu()
+        cpu.IX = 0xC500
+        cpu.bus.mem[0xC503] = 0x0A
+        load_prog(cpu, [0xDD, 0x35, 0x03])          # DEC (IX+3)
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC503] == 0x09
+        assert cycles == 23
+
+    # -----------------------------------------------------------------------
+    # ADD A, (IX+d)  —  DD 86 d
+    # -----------------------------------------------------------------------
+
+    def test_add_a_ix_d(self):
+        cpu = make_cpu()
+        cpu.A = 0x10
+        cpu.IX = 0xC600
+        cpu.bus.mem[0xC605] = 0x05
+        load_prog(cpu, [0xDD, 0x86, 0x05])          # ADD A, (IX+5)
+        cycles = cpu.step()
+        assert cpu.A == 0x15
+        assert cycles == 19
+
+    # -----------------------------------------------------------------------
+    # ADD IX, rr  —  DD 09/19/29/39
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,reg_attr,rr_val,ix_start,expected", [
+        (0x09, 'BC', 0x0010, 0x1000, 0x1010),  # ADD IX, BC
+        (0x19, 'DE', 0x0020, 0x1000, 0x1020),  # ADD IX, DE
+        (0x29, None, None,   0x1000, 0x2000),  # ADD IX, IX
+        (0x39, 'SP', 0x0030, 0x1000, 0x1030),  # ADD IX, SP
+    ])
+    def test_add_ix_rr(self, opcode, reg_attr, rr_val, ix_start, expected):
+        cpu = make_cpu()
+        cpu.IX = ix_start
+        if reg_attr:
+            setattr(cpu, reg_attr, rr_val)
+        load_prog(cpu, [0xDD, opcode])
+        cycles = cpu.step()
+        assert cpu.IX == expected
+        assert cycles == 15
+
+    def test_add_ix_rr_carry(self):
+        cpu = make_cpu()
+        cpu.IX = 0xFFFF
+        cpu.BC = 0x0001
+        set_flags(cpu, S=True, Z=True, PV=True)   # S/Z/PV preserved
+        load_prog(cpu, [0xDD, 0x09])               # ADD IX, BC
+        cpu.step()
+        assert cpu.IX == 0x0000
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'S')    # preserved
+        assert flag(cpu, 'Z')    # preserved
+        assert flag(cpu, 'PV')   # preserved
+
+    # -----------------------------------------------------------------------
+    # JP (IX)  —  DD E9
+    # -----------------------------------------------------------------------
+
+    def test_jp_ix(self):
+        cpu = make_cpu()
+        cpu.IX = 0x4000
+        load_prog(cpu, [0xDD, 0xE9])
+        cycles = cpu.step()
+        assert cpu.PC == 0x4000
+        assert cycles == 8
+
+    def test_jp_iy(self):
+        cpu = make_cpu()
+        cpu.IY = 0x5000
+        load_prog(cpu, [0xFD, 0xE9])
+        cycles = cpu.step()
+        assert cpu.PC == 0x5000
+        assert cycles == 8
+
+    # -----------------------------------------------------------------------
+    # PUSH IX / POP IX  —  DD E5 / DD E1
+    # -----------------------------------------------------------------------
+
+    def test_push_ix(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.IX = 0xDEAD
+        load_prog(cpu, [0xDD, 0xE5])
+        cycles = cpu.step()
+        assert cpu._read16(cpu.SP) == 0xDEAD
+        assert cpu.SP == 0xFFFD
+        assert cycles == 15
+
+    def test_pop_ix(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFD
+        cpu._write16(0xFFFD, 0xBEEF)
+        load_prog(cpu, [0xDD, 0xE1])
+        cycles = cpu.step()
+        assert cpu.IX == 0xBEEF
+        assert cpu.SP == 0xFFFF
+        assert cycles == 14
+
+    def test_push_pop_ix_roundtrip(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.IX = 0x1234
+        load_prog(cpu, [0xDD, 0xE5, 0xDD, 0xE1])
+        cpu.step()   # PUSH IX
+        cpu.step()   # POP IX
+        assert cpu.IX == 0x1234
+        assert cpu.SP == 0xFFFF
+
+    # -----------------------------------------------------------------------
+    # LD SP, IX  —  DD F9
+    # -----------------------------------------------------------------------
+
+    def test_ld_sp_ix(self):
+        cpu = make_cpu()
+        cpu.IX = 0x8000
+        load_prog(cpu, [0xDD, 0xF9])
+        cycles = cpu.step()
+        assert cpu.SP == 0x8000
+        assert cycles == 10
+
+    # -----------------------------------------------------------------------
+    # Undocumented: LD IXH/IXL, n  and  INC/DEC IXH/IXL
+    # -----------------------------------------------------------------------
+
+    def test_ld_ixh_n(self):
+        cpu = make_cpu()
+        cpu.IX = 0x0000
+        load_prog(cpu, [0xDD, 0x26, 0xAB])   # LD IXH, 0xAB
+        cpu.step()
+        assert (cpu.IX >> 8) == 0xAB
+
+    def test_ld_ixl_n(self):
+        cpu = make_cpu()
+        cpu.IX = 0x0000
+        load_prog(cpu, [0xDD, 0x2E, 0xCD])   # LD IXL, 0xCD
+        cpu.step()
+        assert (cpu.IX & 0xFF) == 0xCD
+
+    def test_inc_ixh(self):
+        cpu = make_cpu()
+        cpu.IX = 0x0100
+        load_prog(cpu, [0xDD, 0x24])          # INC IXH
+        cpu.step()
+        assert (cpu.IX >> 8) == 0x02
+
+    def test_inc_ixl(self):
+        cpu = make_cpu()
+        cpu.IX = 0x00FF
+        load_prog(cpu, [0xDD, 0x2C])          # INC IXL
+        cpu.step()
+        assert (cpu.IX & 0xFF) == 0x00        # wraps
+        assert flag(cpu, 'Z')
+
+    # -----------------------------------------------------------------------
+    # DDCB — shift/rotate/BIT/RES/SET on (IX+d)
+    # -----------------------------------------------------------------------
+
+    def test_ddcb_rlc(self):
+        # DD CB d 06 = RLC (IX+d), 23 cycles
+        cpu = make_cpu()
+        cpu.IX = 0xC700
+        cpu.bus.mem[0xC703] = 0b10000001
+        load_prog(cpu, [0xDD, 0xCB, 0x03, 0x06])
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC703] == 0b00000011
+        assert flag(cpu, 'C')
+        assert cycles == 23
+
+    def test_ddcb_rl(self):
+        # DD CB d 16 = RL (IX+d)
+        cpu = make_cpu()
+        cpu.IX = 0xC800
+        cpu.bus.mem[0xC801] = 0b10000000
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xDD, 0xCB, 0x01, 0x16])
+        cpu.step()
+        assert cpu.bus.mem[0xC801] == 0b00000001   # old C in at bit 0
+        assert flag(cpu, 'C')                       # old bit 7 out
+
+    def test_ddcb_srl(self):
+        # DD CB d 3E = SRL (IX+d)
+        cpu = make_cpu()
+        cpu.IX = 0xC900
+        cpu.bus.mem[0xC902] = 0b10000001
+        load_prog(cpu, [0xDD, 0xCB, 0x02, 0x3E])
+        cpu.step()
+        assert cpu.bus.mem[0xC902] == 0b01000000
+        assert flag(cpu, 'C')
+
+    def test_ddcb_bit_zero(self):
+        # DD CB d 46 = BIT 0, (IX+d), 20 cycles
+        cpu = make_cpu()
+        cpu.IX = 0xCA00
+        cpu.bus.mem[0xCA01] = 0b11111110            # bit 0 = 0
+        load_prog(cpu, [0xDD, 0xCB, 0x01, 0x46])
+        cycles = cpu.step()
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'H')
+        assert not flag(cpu, 'N')
+        assert cycles == 20
+
+    def test_ddcb_bit_nonzero(self):
+        # DD CB d 46 = BIT 0, (IX+d) — bit is set → Z=0
+        cpu = make_cpu()
+        cpu.IX = 0xCB00
+        cpu.bus.mem[0xCB01] = 0b00000001
+        load_prog(cpu, [0xDD, 0xCB, 0x01, 0x46])
+        cpu.step()
+        assert not flag(cpu, 'Z')
+
+    def test_ddcb_res(self):
+        # DD CB d 86 = RES 0, (IX+d), 23 cycles
+        cpu = make_cpu()
+        cpu.IX = 0xCC00
+        cpu.bus.mem[0xCC04] = 0xFF
+        load_prog(cpu, [0xDD, 0xCB, 0x04, 0x86])
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xCC04] == 0b11111110
+        assert cycles == 23
+
+    def test_ddcb_set(self):
+        # DD CB d C6 = SET 0, (IX+d), 23 cycles
+        cpu = make_cpu()
+        cpu.IX = 0xCD00
+        cpu.bus.mem[0xCD05] = 0x00
+        load_prog(cpu, [0xDD, 0xCB, 0x05, 0xC6])
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xCD05] == 0b00000001
+        assert cycles == 23
+
+    def test_ddcb_shift_also_writes_register(self):
+        # DD CB d 00 = RLC (IX+d), result also written to B
+        cpu = make_cpu()
+        cpu.IX = 0xCE00
+        cpu.bus.mem[0xCE01] = 0b01010101
+        load_prog(cpu, [0xDD, 0xCB, 0x01, 0x00])   # RLC (IX+1) → B
+        cpu.step()
+        result = 0b10101010
+        assert cpu.bus.mem[0xCE01] == result
+        assert cpu.B == result
+
+    def test_ddcb_negative_displacement(self):
+        # Negative displacement: DD CB FE 06 = RLC (IX-2)
+        cpu = make_cpu()
+        cpu.IX = 0xC010
+        cpu.bus.mem[0xC00E] = 0b00000010   # at IX-2
+        load_prog(cpu, [0xDD, 0xCB, 0xFE, 0x06])
+        cpu.step()
+        assert cpu.bus.mem[0xC00E] == 0b00000100
+        assert not flag(cpu, 'C')
+
+    def test_fdcb_set(self):
+        # FD CB d C6 = SET 0, (IY+d)
+        cpu = make_cpu()
+        cpu.IY = 0xCF00
+        cpu.bus.mem[0xCF02] = 0x00
+        load_prog(cpu, [0xFD, 0xCB, 0x02, 0xC6])
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xCF02] == 0b00000001
+        assert cycles == 23

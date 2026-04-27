@@ -633,10 +633,21 @@ def build_all_tables(cpu):
 
         def _make_ld_rr(d, s):
             def handler():
-                setr(d, getr(s))
-                # (IX+d) or (IY+d) memory access takes extra cycles
                 if (cpu._dd or cpu._fd) and (d == 6 or s == 6):
+                    # When one operand is (IX+d)/(IY+d) memory, H and L on
+                    # the register side stay as plain H/L, NOT IXH/IXL.
+                    # e.g. LD H,(IX+d) writes to H; LD (IX+d),H reads from H.
+                    if s == 6:
+                        val = bus.read(cpu._idx_addr)
+                        if   d == 4: cpu.H = val & 0xFF
+                        elif d == 5: cpu.L = val & 0xFF
+                        else:        setr(d, val)
+                    else:
+                        val = (cpu.H if s == 4 else
+                               cpu.L if s == 5 else getr(s))
+                        bus.write(cpu._idx_addr, val)
                     return 15           # 15 + 4 prefix = 19 total
+                setr(d, getr(s))
                 return 7 if (d == 6 or s == 6) else 4
             return handler
 
