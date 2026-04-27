@@ -16,7 +16,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pygear.vdp.vdp   import VDP, VRAM_SIZE, CRAM_SIZE, NUM_REGS
+from pygear.vdp.vdp   import (VDP, VRAM_SIZE, CRAM_SIZE, NUM_REGS,
+                               CYCLES_PER_LINE, TOTAL_LINES, ACTIVE_LINES,
+                               SCREEN_W, SCREEN_H, CROP_X, CROP_Y)
 from pygear.vdp.tiles import decode_tile, TILE_BYTES
 
 
@@ -1142,3 +1144,290 @@ class TestCRAMColor:
         cram_idx, _ = line[0]
         assert cram_idx == 19
         assert vdp.cram_color(cram_idx) == (0xC * 17, 0x3 * 17, 0x7 * 17)
+
+
+# ---------------------------------------------------------------------------
+# Timing helpers
+# ---------------------------------------------------------------------------
+
+class MockCPU:
+    """Minimal CPU stub that counts interrupt requests."""
+    def __init__(self):
+        self.interrupt_count = 0
+
+    def request_interrupt(self):
+        self.interrupt_count += 1
+
+
+def make_timing_vdp(cpu=None) -> VDP:
+    vdp = VDP()
+    vdp.reset()
+    if cpu is not None:
+        vdp.attach_cpu(cpu)
+    return vdp
+
+
+def step_lines(vdp: VDP, n: int) -> None:
+    """Advance the VDP by exactly *n* complete scanlines."""
+    vdp.step(n * CYCLES_PER_LINE)
+
+
+class TestVDPTiming:
+    # -----------------------------------------------------------------------
+    # Cycle / line accumulation
+    # -----------------------------------------------------------------------
+
+    def test_step_accumulates_cycles_within_line(self):
+        vdp = make_timing_vdp()
+        vdp.step(100)
+        assert vdp._cycle == 100
+        assert vdp._line  == 0
+
+    def test_step_partial_line_does_not_advance(self):
+        vdp = make_timing_vdp()
+        vdp.step(CYCLES_PER_LINE - 1)
+        assert vdp._line == 0
+
+    def test_step_exactly_one_line_advances(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, 1)
+        assert vdp._line == 1
+        assert vdp._cycle == 0
+
+    def test_step_two_lines(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, 2)
+        assert vdp._line == 2
+
+    def test_step_large_chunk_advances_multiple_lines(self):
+        vdp = make_timing_vdp()
+        vdp.step(CYCLES_PER_LINE * 10 + 50)
+        assert vdp._line  == 10
+        assert vdp._cycle == 50
+
+    def test_line_wraps_at_total_lines(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, TOTAL_LINES)
+        assert vdp._line == 0
+
+    def test_line_advances_through_full_frame_and_wraps(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, TOTAL_LINES + 5)
+        assert vdp._line == 5
+
+    # -----------------------------------------------------------------------
+    # Line buffer — active scanlines rendered
+    # -----------------------------------------------------------------------
+
+    def test_line_buffer_none_before_any_step(self):
+        vdp = make_timing_vdp()
+        assert vdp._line_buffer[0] is None
+
+    def test_line_buffer_filled_after_line_0(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, 1)
+        assert vdp._line_buffer[0] is not None
+        assert len(vdp._line_buffer[0]) == 256
+
+    def test_line_buffer_filled_for_all_active_lines(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES)
+        assert all(vdp._line_buffer[i] is not None for i in range(ACTIVE_LINES))
+
+    # -----------------------------------------------------------------------
+    # VBlank flag and interrupt
+    # -----------------------------------------------------------------------
+
+    def test_vblank_flag_not_set_before_line_192(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES - 1)
+        assert not (vdp.status & 0x80)
+
+    def test_vblank_flag_set_at_line_192(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.status & 0x80
+
+    def test_vblank_interrupt_fires_when_r1_bit5_set(self):
+        cpu = MockCPU()
+        vdp = make_timing_vdp(cpu)
+        vdp.regs[1] = 0x20          # R1 bit 5 = VBlank IRQ enable
+        step_lines(vdp, ACTIVE_LINES)
+        assert cpu.interrupt_count == 1
+
+    def test_vblank_interrupt_not_fired_without_r1_bit5(self):
+        cpu = MockCPU()
+        vdp = make_timing_vdp(cpu)
+        vdp.regs[1] = 0x00
+        step_lines(vdp, ACTIVE_LINES)
+        assert cpu.interrupt_count == 0
+
+    def test_vblank_fires_once_per_frame(self):
+        cpu = MockCPU()
+        vdp = make_timing_vdp(cpu)
+        vdp.regs[1] = 0x20
+        step_lines(vdp, TOTAL_LINES)
+        assert cpu.interrupt_count == 1
+
+    def test_vblank_fires_twice_in_two_frames(self):
+        cpu = MockCPU()
+        vdp = make_timing_vdp(cpu)
+        vdp.regs[1] = 0x20
+        step_lines(vdp, TOTAL_LINES * 2)
+        assert cpu.interrupt_count == 2
+
+    def test_vblank_without_cpu_does_not_raise(self):
+        vdp = make_timing_vdp(cpu=None)
+        vdp.regs[1] = 0x20
+        step_lines(vdp, ACTIVE_LINES)   # must not raise AttributeError
+        assert vdp.status & 0x80
+
+    # -----------------------------------------------------------------------
+    # Line interrupt
+    # -----------------------------------------------------------------------
+
+    def test_line_irq_fires_every_line_when_r10_is_0(self):
+        # R10=0, counter starts at 0 → fires after every active line
+        cpu = MockCPU()
+        vdp = make_timing_vdp(cpu)
+        vdp.regs[0]  = 0x10    # line IRQ enable
+        vdp.regs[10] = 0       # reload value = 0
+        vdp._line_irq = 0
+        step_lines(vdp, 4)
+        assert cpu.interrupt_count == 4
+
+    def test_line_irq_fires_after_r10_plus_1_lines(self):
+        # R10=3, counter initialised to 3 → fires after line 3, then 7, ...
+        cpu = MockCPU()
+        vdp = make_timing_vdp(cpu)
+        vdp.regs[0]   = 0x10
+        vdp.regs[10]  = 3
+        vdp._line_irq = 3
+        step_lines(vdp, 3)
+        assert cpu.interrupt_count == 0   # not yet
+        step_lines(vdp, 1)
+        assert cpu.interrupt_count == 1   # fires after line 3
+
+    def test_line_irq_reloads_and_fires_again(self):
+        cpu = MockCPU()
+        vdp = make_timing_vdp(cpu)
+        vdp.regs[0]   = 0x10
+        vdp.regs[10]  = 1
+        vdp._line_irq = 1
+        step_lines(vdp, 8)    # fires at lines 1, 3, 5, 7 → 4 times
+        assert cpu.interrupt_count == 4
+
+    def test_line_irq_not_fired_without_r0_bit4(self):
+        cpu = MockCPU()
+        vdp = make_timing_vdp(cpu)
+        vdp.regs[0]   = 0x00    # bit 4 clear
+        vdp.regs[10]  = 0
+        vdp._line_irq = 0
+        step_lines(vdp, ACTIVE_LINES)
+        assert cpu.interrupt_count == 0
+
+    def test_line_irq_does_not_fire_during_vblank(self):
+        # Enable line IRQ with R10=0 (fires every active line); step into VBlank
+        # and verify no extra interrupts during the VBlank period.
+        cpu = MockCPU()
+        vdp = make_timing_vdp(cpu)
+        vdp.regs[0]   = 0x10
+        vdp.regs[10]  = 0
+        vdp._line_irq = 0
+        step_lines(vdp, ACTIVE_LINES)
+        count_after_active = cpu.interrupt_count
+        step_lines(vdp, TOTAL_LINES - ACTIVE_LINES)   # rest of VBlank
+        assert cpu.interrupt_count == count_after_active
+
+    def test_line_irq_counter_reloaded_during_vblank(self):
+        vdp = make_timing_vdp()
+        vdp.regs[10]  = 7
+        vdp._line_irq = 0
+        step_lines(vdp, ACTIVE_LINES + 1)   # one VBlank line processed
+        assert vdp._line_irq == 7
+
+    def test_line_irq_without_cpu_does_not_raise(self):
+        vdp = make_timing_vdp(cpu=None)
+        vdp.regs[0]   = 0x10
+        vdp.regs[10]  = 0
+        vdp._line_irq = 0
+        step_lines(vdp, 1)   # must not raise AttributeError
+
+    # -----------------------------------------------------------------------
+    # Frame assembly
+    # -----------------------------------------------------------------------
+
+    def test_frame_not_ready_before_vblank(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES - 1)
+        assert not vdp.frame_ready
+
+    def test_frame_ready_at_vblank(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.frame_ready
+
+    def test_frame_is_screen_height_rows(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES)
+        assert len(vdp.frame) == SCREEN_H
+
+    def test_frame_row_is_screen_width_pixels(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES)
+        assert all(len(row) == SCREEN_W for row in vdp.frame)
+
+    def test_frame_pixels_are_rgb_tuples(self):
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES)
+        px = vdp.frame[0][0]
+        assert isinstance(px, tuple) and len(px) == 3
+
+    def test_frame_crop_x_left_edge(self):
+        # frame[0][0] = internal pixel (CROP_X=48, CROP_Y=24)
+        # → tile col CROP_X//8=6, tile row CROP_Y//8=3
+        vdp = make_bg_vdp()
+        write_cram_color(vdp, 1, r4=0xF, g4=0, b4=0)   # CRAM 1 = red
+        write_solid_tile(vdp, 1, color=1)
+        write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=1)
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.frame[0][0] == (255, 0, 0)
+
+    def test_frame_crop_y_top_edge(self):
+        # Internal row CROP_Y maps to frame row 0
+        # Place tile at bg tile row CROP_Y//8 = 3, the column covered by CROP_X
+        vdp = make_bg_vdp()
+        write_cram_color(vdp, 2, r4=0, g4=0xF, b4=0)   # CRAM 2 = green
+        write_solid_tile(vdp, 2, color=2)
+        write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=2)
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.frame[0][0] == (0, 255, 0)
+
+    def test_frame_crop_right_edge(self):
+        # frame[0][SCREEN_W-1] = internal pixel (CROP_X+159=207, CROP_Y=24)
+        # → tile col 207//8=25, tile row CROP_Y//8=3
+        vdp = make_bg_vdp()
+        write_cram_color(vdp, 3, r4=0, g4=0, b4=0xF)   # CRAM 3 = blue
+        write_solid_tile(vdp, 3, color=3)
+        right_tile_col = (CROP_X + SCREEN_W - 1) // 8   # = 25
+        write_name_entry(vdp, CROP_Y // 8, right_tile_col, tile_num=3)
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.frame[0][SCREEN_W - 1] == (0, 0, 255)
+
+    def test_frame_crop_bottom_edge(self):
+        # Internal row CROP_Y + SCREEN_H - 1 = 167 → tile row 20, pixel row 7
+        vdp = make_bg_vdp()
+        write_cram_color(vdp, 4, r4=0xF, g4=0xF, b4=0)
+        write_solid_tile(vdp, 4, color=4)
+        bottom_tile_row = (CROP_Y + SCREEN_H - 1) // 8  # = 20
+        write_name_entry(vdp, bottom_tile_row, CROP_X // 8, tile_num=4)
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.frame[SCREEN_H - 1][0] == (255, 255, 0)   # color=4 → CRAM 4 = 0xF,0xF,0
+
+    def test_frame_ready_not_cleared_by_vdp(self):
+        # VDP sets frame_ready; caller is responsible for clearing it
+        vdp = make_timing_vdp()
+        step_lines(vdp, ACTIVE_LINES)
+        assert vdp.frame_ready
+        step_lines(vdp, TOTAL_LINES - ACTIVE_LINES)
+        assert vdp.frame_ready  # still True; caller hasn't cleared it

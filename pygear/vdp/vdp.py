@@ -26,11 +26,27 @@ V-counter (NTSC)
 ----------------
 Lines 0–218 (0x00–0xDA) count linearly.
 Line 219 jumps to 0xD5 and continues to 0xFF at line 261.
+
+Timing
+------
+228 T-states per scanline, 262 scanlines per frame (NTSC).
+Active display: lines 0–191.  VBlank: lines 192–261.
 """
 
 VRAM_SIZE = 0x4000   # 16 KB
 CRAM_SIZE = 64       # 32 colours × 2 bytes
 NUM_REGS  = 11       # R0–R10
+
+# NTSC timing
+CYCLES_PER_LINE = 228
+TOTAL_LINES     = 262
+ACTIVE_LINES    = 192
+
+# Game Gear display window cropped from 256×192 internal render
+SCREEN_W = 160
+SCREEN_H = 144
+CROP_X   = 48    # (256 - 160) // 2
+CROP_Y   = 24    # (192 - 144) // 2
 
 # NTSC V-counter non-linear mapping
 _VCTR_LINEAR_END = 0xDA   # last line with identity mapping
@@ -51,9 +67,15 @@ class VDP:
         self._latch_lo = 0      # buffered first command byte
         self._read_buf = 0      # VRAM read-ahead buffer
 
-        # Timing state (updated by step() in Task 5)
-        self._line  = 0         # current scanline 0–261
-        self._cycle = 0         # T-states into current scanline
+        # Timing state
+        self._line     = 0      # current scanline 0–261
+        self._cycle    = 0      # T-states into current scanline
+        self._line_irq = 0      # line interrupt down-counter
+
+        # Frame output
+        self._line_buffer = [None] * ACTIVE_LINES   # rendered scanlines 0–191
+        self.frame        = None    # assembled 144×160 list of (R,G,B) tuples
+        self.frame_ready  = False   # True after each VBlank; caller clears it
 
         self._cpu = None        # set by attach_cpu()
 
@@ -67,14 +89,18 @@ class VDP:
         for i in range(VRAM_SIZE): self.vram[i] = 0
         for i in range(CRAM_SIZE): self.cram[i] = 0
         for i in range(NUM_REGS):  self.regs[i] = 0
-        self.status    = 0
-        self._addr     = 0
-        self._code     = 0
-        self._latch    = False
-        self._latch_lo = 0
-        self._read_buf = 0
-        self._line     = 0
-        self._cycle    = 0
+        self.status       = 0
+        self._addr        = 0
+        self._code        = 0
+        self._latch       = False
+        self._latch_lo    = 0
+        self._read_buf    = 0
+        self._line        = 0
+        self._cycle       = 0
+        self._line_irq    = 0
+        self._line_buffer = [None] * ACTIVE_LINES
+        self.frame        = None
+        self.frame_ready  = False
 
     # ------------------------------------------------------------------
     # Port interface
@@ -274,3 +300,57 @@ class VDP:
         g = ((word >> 4) & 0xF) * 17
         b = ((word >> 8) & 0xF) * 17
         return (r, g, b)
+
+    # ------------------------------------------------------------------
+    # Frame stepper
+    # ------------------------------------------------------------------
+    def step(self, cycles: int) -> None:
+        """Advance the VDP by *cycles* T-states.
+
+        For every completed scanline (228 T-states) _end_of_line() is called:
+        active lines are rendered and interrupts are evaluated; VBlank fires
+        when the line counter transitions to ACTIVE_LINES (192).
+        """
+        self._cycle += cycles
+        while self._cycle >= CYCLES_PER_LINE:
+            self._cycle -= CYCLES_PER_LINE
+            self._end_of_line()
+
+    def _end_of_line(self) -> None:
+        line = self._line
+
+        if line < ACTIVE_LINES:
+            # Render scanline into buffer
+            self._line_buffer[line] = self.render_line(line)
+            # Line interrupt counter (R0 bit 4 enables, R10 is reload value)
+            if self._line_irq == 0:
+                self._line_irq = self.regs[10]
+                if (self.regs[0] & 0x10) and self._cpu:
+                    self._cpu.request_interrupt()
+            else:
+                self._line_irq -= 1
+        else:
+            # VBlank lines: reload counter from R10 each line (no fire)
+            self._line_irq = self.regs[10]
+
+        self._line = (line + 1) % TOTAL_LINES
+
+        # VBlank event: fires as _line transitions to ACTIVE_LINES
+        if self._line == ACTIVE_LINES:
+            self.status |= 0x80                      # frame interrupt flag
+            if (self.regs[1] & 0x20) and self._cpu:  # R1 bit 5 enables VBlank IRQ
+                self._cpu.request_interrupt()
+            self._assemble_frame()
+
+    def _assemble_frame(self) -> None:
+        """Crop the 256×192 line buffer to the 160×144 Game Gear display."""
+        frame = []
+        for row in range(SCREEN_H):
+            src_row = self._line_buffer[row + CROP_Y]
+            frame_row = []
+            for col in range(SCREEN_W):
+                cram_idx, _ = src_row[col + CROP_X]
+                frame_row.append(self.cram_color(cram_idx))
+            frame.append(frame_row)
+        self.frame       = frame
+        self.frame_ready = True
