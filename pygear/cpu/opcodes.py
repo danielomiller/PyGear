@@ -1286,17 +1286,17 @@ def build_all_tables(cpu):
         diff = (cpu.A - val) & 0xFF
         h    = ((cpu.A & 0xF) - (val & 0xF)) < 0
         n    = (diff - (1 if h else 0)) & 0xFF
-        f    = (cpu.F & C_FLAG) | N_FLAG
-        if h:          f |= H_FLAG
-        if diff & 0x80: f |= S_FLAG
-        if diff == 0:  f |= Z_FLAG
-        if cpu.BC:     f |= PV_FLAG
-        f |= (n << 1) & Y_FLAG
-        f |= n & X_FLAG
-        cpu.F = f
         if inc: cpu.HL = (cpu.HL + 1) & 0xFFFF
         else:   cpu.HL = (cpu.HL - 1) & 0xFFFF
         cpu.BC = (cpu.BC - 1) & 0xFFFF
+        f    = (cpu.F & C_FLAG) | N_FLAG
+        if h:           f |= H_FLAG
+        if diff & 0x80: f |= S_FLAG
+        if diff == 0:   f |= Z_FLAG
+        if cpu.BC:      f |= PV_FLAG   # PV reflects BC after decrement
+        f |= (n << 1) & Y_FLAG
+        f |= n & X_FLAG
+        cpu.F = f
 
     def op_A1():  # CPI
         val = bus.read(cpu.HL); _cpi_flags(val, True); return 16

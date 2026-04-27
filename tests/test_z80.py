@@ -14,6 +14,7 @@ S=0x80  Z=0x40  Y=0x20  H=0x10  X=0x08  PV=0x04  N=0x02  C=0x01
 import sys
 import os
 import pytest
+from collections import deque
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -53,15 +54,19 @@ class FakePorts:
 
     def __init__(self, default: int = 0xFF):
         self._default = default
-        self._values: dict[int, int] = {}   # port → value for next read
+        self._values: dict[int, deque] = {}
         self.writes:  list[tuple[int, int]] = []  # (port, value) log
 
     def set_port(self, port: int, value: int):
         """Pre-load a value to be returned by the next read from *port*."""
-        self._values[port] = value
+        if port not in self._values:
+            self._values[port] = deque()
+        self._values[port].append(value)
 
     def read(self, port: int) -> int:
-        return self._values.pop(port, self._default)
+        if port in self._values and self._values[port]:
+            return self._values[port].popleft()
+        return self._default
 
     def write(self, port: int, value: int):
         self.writes.append((port, value))
@@ -2766,3 +2771,698 @@ class TestIndexed:
         cycles = cpu.step()
         assert cpu.bus.mem[0xCF02] == 0b00000001
         assert cycles == 23
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — ED prefix, block instructions, interrupts
+# ---------------------------------------------------------------------------
+
+class TestED:
+    """ED-prefix instructions: 16-bit arithmetic, I/O, special loads."""
+
+    # -----------------------------------------------------------------------
+    # SBC HL, rr  (ED 42/52/62/72) — 15 cycles, all flags, N=1
+    # -----------------------------------------------------------------------
+
+    def test_sbc_hl_bc_basic(self):
+        cpu = make_cpu()
+        cpu.HL = 0x0010; cpu.BC = 0x0005
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xED, 0x42])
+        cycles = cpu.step()
+        assert cpu.HL == 0x000B
+        assert flag(cpu, 'N')
+        assert not flag(cpu, 'Z')
+        assert not flag(cpu, 'C')
+        assert cycles == 15
+
+    def test_sbc_hl_bc_with_carry(self):
+        cpu = make_cpu()
+        cpu.HL = 0x0010; cpu.BC = 0x0005
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xED, 0x42])
+        cpu.step()
+        assert cpu.HL == 0x000A
+
+    def test_sbc_hl_to_zero(self):
+        cpu = make_cpu()
+        cpu.HL = 0x1234; cpu.BC = 0x1234
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xED, 0x42])
+        cpu.step()
+        assert cpu.HL == 0x0000
+        assert flag(cpu, 'Z')
+        assert not flag(cpu, 'C')
+
+    def test_sbc_hl_borrow(self):
+        # 0x0000 - 0x0001 = 0xFFFF, C=1, S=1
+        cpu = make_cpu()
+        cpu.HL = 0x0000; cpu.BC = 0x0001
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xED, 0x42])
+        cpu.step()
+        assert cpu.HL == 0xFFFF
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'S')
+
+    def test_sbc_hl_overflow(self):
+        # 0x8000 - 0x0001 → 0x7FFF: PV=1 (neg − pos = pos)
+        cpu = make_cpu()
+        cpu.HL = 0x8000; cpu.DE = 0x0001
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xED, 0x52])    # SBC HL, DE
+        cpu.step()
+        assert cpu.HL == 0x7FFF
+        assert flag(cpu, 'PV')
+
+    def test_sbc_hl_sp(self):
+        cpu = make_cpu()
+        cpu.HL = 0x0100; cpu.SP = 0x0050
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xED, 0x72])    # SBC HL, SP
+        cpu.step()
+        assert cpu.HL == 0x00B0
+
+    # -----------------------------------------------------------------------
+    # ADC HL, rr  (ED 4A/5A/6A/7A) — 15 cycles, all flags, N=0
+    # -----------------------------------------------------------------------
+
+    def test_adc_hl_bc_basic(self):
+        cpu = make_cpu()
+        cpu.HL = 0x0010; cpu.BC = 0x0005
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xED, 0x4A])
+        cycles = cpu.step()
+        assert cpu.HL == 0x0015
+        assert not flag(cpu, 'N')
+        assert not flag(cpu, 'C')
+        assert cycles == 15
+
+    def test_adc_hl_bc_with_carry(self):
+        cpu = make_cpu()
+        cpu.HL = 0x0010; cpu.BC = 0x0005
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xED, 0x4A])
+        cpu.step()
+        assert cpu.HL == 0x0016
+
+    def test_adc_hl_overflow_positive(self):
+        # 0x7FFF + 1 → 0x8000: PV=1, S=1
+        cpu = make_cpu()
+        cpu.HL = 0x7FFF; cpu.DE = 0x0001
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xED, 0x5A])    # ADC HL, DE
+        cpu.step()
+        assert cpu.HL == 0x8000
+        assert flag(cpu, 'PV')
+        assert flag(cpu, 'S')
+
+    def test_adc_hl_carry_out(self):
+        cpu = make_cpu()
+        cpu.HL = 0xFFFF; cpu.BC = 0x0001
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xED, 0x4A])
+        cpu.step()
+        assert cpu.HL == 0x0000
+        assert flag(cpu, 'C')
+        assert flag(cpu, 'Z')
+
+    def test_adc_hl_hl(self):
+        # ADC HL, HL = double HL (no carry)
+        cpu = make_cpu()
+        cpu.HL = 0x0010
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xED, 0x6A])
+        cpu.step()
+        assert cpu.HL == 0x0020
+
+    # -----------------------------------------------------------------------
+    # LD (nn), rr / LD rr, (nn)  (20 cycles)
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize("opcode,reg_attr,val", [
+        (0x43, 'BC', 0x1234),
+        (0x53, 'DE', 0x5678),
+        (0x63, 'HL', 0x9ABC),
+        (0x73, 'SP', 0xDEF0),
+    ])
+    def test_ld_nn_rr(self, opcode, reg_attr, val):
+        cpu = make_cpu()
+        setattr(cpu, reg_attr, val)
+        load_prog(cpu, [0xED, opcode, 0x00, 0xC0])
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC000] == val & 0xFF
+        assert cpu.bus.mem[0xC001] == (val >> 8) & 0xFF
+        assert cycles == 20
+
+    @pytest.mark.parametrize("opcode,reg_attr,val", [
+        (0x4B, 'BC', 0x1234),
+        (0x5B, 'DE', 0x5678),
+        (0x6B, 'HL', 0x9ABC),
+        (0x7B, 'SP', 0xDEF0),
+    ])
+    def test_ld_rr_nn(self, opcode, reg_attr, val):
+        cpu = make_cpu()
+        cpu.bus.mem[0xC000] = val & 0xFF
+        cpu.bus.mem[0xC001] = (val >> 8) & 0xFF
+        load_prog(cpu, [0xED, opcode, 0x00, 0xC0])
+        cycles = cpu.step()
+        assert getattr(cpu, reg_attr) == val
+        assert cycles == 20
+
+    # -----------------------------------------------------------------------
+    # IM 0 / 1 / 2
+    # -----------------------------------------------------------------------
+
+    def test_im0(self):
+        cpu = make_cpu()
+        cpu.IM = 1
+        load_prog(cpu, [0xED, 0x46])
+        cycles = cpu.step()
+        assert cpu.IM == 0
+        assert cycles == 8
+
+    def test_im1(self):
+        cpu = make_cpu()
+        cpu.IM = 0
+        load_prog(cpu, [0xED, 0x56])
+        cycles = cpu.step()
+        assert cpu.IM == 1
+        assert cycles == 8
+
+    def test_im2(self):
+        cpu = make_cpu()
+        cpu.IM = 1
+        load_prog(cpu, [0xED, 0x5E])
+        cycles = cpu.step()
+        assert cpu.IM == 2
+        assert cycles == 8
+
+    # -----------------------------------------------------------------------
+    # LD I/R, A  and  LD A, I/R
+    # -----------------------------------------------------------------------
+
+    def test_ld_i_a(self):
+        cpu = make_cpu()
+        cpu.A = 0x42
+        load_prog(cpu, [0xED, 0x47])
+        cycles = cpu.step()
+        assert cpu.I == 0x42
+        assert cycles == 9
+
+    def test_ld_r_a(self):
+        cpu = make_cpu()
+        cpu.A = 0x55
+        load_prog(cpu, [0xED, 0x4F])
+        cycles = cpu.step()
+        assert cpu.R == 0x55
+        assert cycles == 9
+
+    def test_ld_a_i_flags(self):
+        # S, Z from I; PV = IFF2; H=0, N=0, C preserved
+        cpu = make_cpu()
+        cpu.I = 0x80
+        cpu.IFF2 = True
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xED, 0x57])
+        cycles = cpu.step()
+        assert cpu.A == 0x80
+        assert flag(cpu, 'S')
+        assert not flag(cpu, 'Z')
+        assert flag(cpu, 'PV')          # PV = IFF2
+        assert not flag(cpu, 'H')
+        assert not flag(cpu, 'N')
+        assert flag(cpu, 'C')           # C preserved
+        assert cycles == 9
+
+    def test_ld_a_i_zero(self):
+        cpu = make_cpu()
+        cpu.I = 0x00
+        cpu.IFF2 = False
+        load_prog(cpu, [0xED, 0x57])
+        cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert not flag(cpu, 'PV')
+
+    def test_ld_a_r(self):
+        cpu = make_cpu()
+        cpu.R = 0x33
+        cpu.IFF2 = True
+        load_prog(cpu, [0xED, 0x5F])
+        cpu.step()
+        assert cpu.A == (cpu.R & 0x7F) | 0x00  # R is 7-bit but we just set it
+        assert flag(cpu, 'PV')
+
+    # -----------------------------------------------------------------------
+    # RLD / RRD
+    # -----------------------------------------------------------------------
+
+    def test_rld(self):
+        # A=0xAB, (HL)=0xCD → A=0xAC, (HL)=0xDB
+        cpu = make_cpu()
+        cpu.A = 0xAB; cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0xCD
+        load_prog(cpu, [0xED, 0x6F])
+        cycles = cpu.step()
+        assert cpu.A == 0xAC
+        assert cpu.bus.mem[0xC000] == 0xDB
+        assert cycles == 18
+
+    def test_rld_flags(self):
+        # RLD sets S/Z/PV from new A; C preserved
+        cpu = make_cpu()
+        cpu.A = 0x00; cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0x00
+        set_flags(cpu, C=True)
+        load_prog(cpu, [0xED, 0x6F])
+        cpu.step()
+        assert cpu.A == 0x00
+        assert flag(cpu, 'Z')
+        assert flag(cpu, 'C')           # C preserved
+
+    def test_rrd(self):
+        # A=0xAB, (HL)=0xCD → A=0xAD, (HL)=0xBC
+        cpu = make_cpu()
+        cpu.A = 0xAB; cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0xCD
+        load_prog(cpu, [0xED, 0x67])
+        cycles = cpu.step()
+        assert cpu.A == 0xAD
+        assert cpu.bus.mem[0xC000] == 0xBC
+        assert cycles == 18
+
+    def test_rld_rrd_roundtrip(self):
+        # RLD then RRD should restore original A and (HL)
+        cpu = make_cpu()
+        cpu.A = 0xAB; cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0xCD
+        load_prog(cpu, [0xED, 0x6F, 0xED, 0x67])
+        cpu.step()   # RLD
+        cpu.step()   # RRD
+        assert cpu.A == 0xAB
+        assert cpu.bus.mem[0xC000] == 0xCD
+
+    # -----------------------------------------------------------------------
+    # RETN / RETI
+    # -----------------------------------------------------------------------
+
+    def test_retn(self):
+        cpu = make_cpu()
+        cpu.IFF2 = True; cpu.IFF1 = False
+        cpu.SP = 0xFFFD
+        cpu._write16(0xFFFD, 0x4000)
+        load_prog(cpu, [0xED, 0x45])
+        cycles = cpu.step()
+        assert cpu.PC == 0x4000
+        assert cpu.IFF1 is True         # IFF1 restored from IFF2
+        assert cycles == 14
+
+    def test_reti(self):
+        cpu = make_cpu()
+        cpu.IFF2 = True; cpu.IFF1 = False
+        cpu.SP = 0xFFFD
+        cpu._write16(0xFFFD, 0x5000)
+        load_prog(cpu, [0xED, 0x4D])
+        cycles = cpu.step()
+        assert cpu.PC == 0x5000
+        assert cpu.IFF1 is True
+        assert cycles == 14
+
+
+class TestBlock:
+    """ED-prefix block transfer/search/IO instructions."""
+
+    # -----------------------------------------------------------------------
+    # LDI / LDIR
+    # -----------------------------------------------------------------------
+
+    def test_ldi_single_step(self):
+        cpu = make_cpu()
+        cpu.HL = 0xC000; cpu.DE = 0xD000; cpu.BC = 0x0003
+        cpu.bus.mem[0xC000] = 0x42
+        load_prog(cpu, [0xED, 0xA0])    # LDI
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xD000] == 0x42
+        assert cpu.HL == 0xC001
+        assert cpu.DE == 0xD001
+        assert cpu.BC == 0x0002
+        assert flag(cpu, 'PV')          # BC still non-zero
+        assert not flag(cpu, 'N')
+        assert not flag(cpu, 'H')
+        assert cycles == 16
+
+    def test_ldi_bc_zero_clears_pv(self):
+        cpu = make_cpu()
+        cpu.HL = 0xC000; cpu.DE = 0xD000; cpu.BC = 0x0001
+        cpu.bus.mem[0xC000] = 0x55
+        load_prog(cpu, [0xED, 0xA0])
+        cpu.step()
+        assert cpu.BC == 0x0000
+        assert not flag(cpu, 'PV')      # BC reached 0 → PV=0
+
+    def test_ldir_copies_block(self):
+        cpu = make_cpu()
+        src = 0xC000; dst = 0xD000; count = 5
+        for i in range(count):
+            cpu.bus.mem[src + i] = 0x10 + i
+        cpu.HL = src; cpu.DE = dst; cpu.BC = count
+        load_prog(cpu, [0xED, 0xB0])    # LDIR
+        cycles = cpu.step()
+        for i in range(count):
+            assert cpu.bus.mem[dst + i] == 0x10 + i
+        assert cpu.BC == 0x0000
+        assert cpu.HL == src + count
+        assert cpu.DE == dst + count
+        assert not flag(cpu, 'PV')
+        # 4 taken + 1 terminal = 21*4 + 16 = 100
+        assert cycles == 21 * (count - 1) + 16
+
+    def test_ldir_bc_one(self):
+        # LDIR with BC=1 → single copy, 16 cycles
+        cpu = make_cpu()
+        cpu.HL = 0xC000; cpu.DE = 0xD000; cpu.BC = 0x0001
+        cpu.bus.mem[0xC000] = 0x99
+        load_prog(cpu, [0xED, 0xB0])
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xD000] == 0x99
+        assert cpu.BC == 0x0000
+        assert cycles == 16
+
+    # -----------------------------------------------------------------------
+    # LDD / LDDR
+    # -----------------------------------------------------------------------
+
+    def test_ldd_single_step(self):
+        cpu = make_cpu()
+        cpu.HL = 0xC002; cpu.DE = 0xD002; cpu.BC = 0x0002
+        cpu.bus.mem[0xC002] = 0x77
+        load_prog(cpu, [0xED, 0xA8])    # LDD
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xD002] == 0x77
+        assert cpu.HL == 0xC001
+        assert cpu.DE == 0xD001
+        assert cpu.BC == 0x0001
+        assert cycles == 16
+
+    def test_lddr_copies_block_backwards(self):
+        cpu = make_cpu()
+        count = 4
+        src = 0xC003; dst = 0xD003
+        for i in range(count):
+            cpu.bus.mem[0xC000 + i] = 0x20 + i
+        cpu.HL = src; cpu.DE = dst; cpu.BC = count
+        load_prog(cpu, [0xED, 0xB8])    # LDDR
+        cpu.step()
+        for i in range(count):
+            assert cpu.bus.mem[0xD000 + i] == 0x20 + i
+        assert cpu.BC == 0x0000
+
+    # -----------------------------------------------------------------------
+    # CPI / CPIR
+    # -----------------------------------------------------------------------
+
+    def test_cpi(self):
+        # CPI: compare A with (HL), HL++, BC--, Z set if match
+        cpu = make_cpu()
+        cpu.A = 0x42; cpu.HL = 0xC000; cpu.BC = 0x0005
+        cpu.bus.mem[0xC000] = 0x42
+        load_prog(cpu, [0xED, 0xA1])    # CPI
+        cycles = cpu.step()
+        assert flag(cpu, 'Z')           # match
+        assert flag(cpu, 'N')
+        assert cpu.HL == 0xC001
+        assert cpu.BC == 0x0004
+        assert cycles == 16
+
+    def test_cpi_no_match(self):
+        cpu = make_cpu()
+        cpu.A = 0x42; cpu.HL = 0xC000; cpu.BC = 0x0005
+        cpu.bus.mem[0xC000] = 0x99
+        load_prog(cpu, [0xED, 0xA1])
+        cpu.step()
+        assert not flag(cpu, 'Z')
+        assert flag(cpu, 'PV')          # BC still non-zero
+
+    def test_cpir_finds_match(self):
+        # CPIR: scan until A found or BC=0
+        cpu = make_cpu()
+        cpu.A = 0x55
+        cpu.HL = 0xC000; cpu.BC = 0x0004
+        cpu.bus.mem[0xC000] = 0x11
+        cpu.bus.mem[0xC001] = 0x22
+        cpu.bus.mem[0xC002] = 0x55     # match at index 2
+        cpu.bus.mem[0xC003] = 0x44
+        load_prog(cpu, [0xED, 0xB1])   # CPIR
+        cycles = cpu.step()
+        assert flag(cpu, 'Z')          # match found
+        assert cpu.HL == 0xC003        # points past the matching byte
+        assert cpu.BC == 0x0001
+        assert cycles == 21 * 2 + 16  # 2 non-matching + 1 matching
+
+    def test_cpir_no_match_exhausts_bc(self):
+        cpu = make_cpu()
+        cpu.A = 0xFF
+        cpu.HL = 0xC000; cpu.BC = 0x0003
+        cpu.bus.mem[0xC000] = 0x00
+        cpu.bus.mem[0xC001] = 0x00
+        cpu.bus.mem[0xC002] = 0x00
+        load_prog(cpu, [0xED, 0xB1])
+        cpu.step()
+        assert not flag(cpu, 'Z')
+        assert not flag(cpu, 'PV')     # BC reached 0
+
+    # -----------------------------------------------------------------------
+    # INIR / OTIR
+    # -----------------------------------------------------------------------
+
+    def test_inir(self):
+        # Read B bytes from port C into memory at HL
+        cpu = make_cpu()
+        cpu.B = 3; cpu.C = 0x10; cpu.HL = 0xC000
+        cpu.ports.set_port(0x10, 0xAA)
+        cpu.ports.set_port(0x10, 0xBB)
+        cpu.ports.set_port(0x10, 0xCC)
+        load_prog(cpu, [0xED, 0xB2])   # INIR
+        cycles = cpu.step()
+        assert cpu.bus.mem[0xC000] == 0xAA
+        assert cpu.bus.mem[0xC001] == 0xBB
+        assert cpu.bus.mem[0xC002] == 0xCC
+        assert cpu.B == 0
+        assert cpu.HL == 0xC003
+        assert flag(cpu, 'Z')
+        assert cycles == 21 * 2 + 16
+
+    def test_otir(self):
+        # Output B bytes from (HL) to port C
+        cpu = make_cpu()
+        cpu.B = 3; cpu.C = 0x20; cpu.HL = 0xC010
+        cpu.bus.mem[0xC010] = 0x11
+        cpu.bus.mem[0xC011] = 0x22
+        cpu.bus.mem[0xC012] = 0x33
+        load_prog(cpu, [0xED, 0xB3])   # OTIR
+        cycles = cpu.step()
+        assert cpu.ports.writes == [(0x20, 0x11), (0x20, 0x22), (0x20, 0x33)]
+        assert cpu.B == 0
+        assert cpu.HL == 0xC013
+        assert cycles == 21 * 2 + 16
+
+    def test_otdr(self):
+        # OTDR: output backwards
+        cpu = make_cpu()
+        cpu.B = 2; cpu.C = 0x30; cpu.HL = 0xC021
+        cpu.bus.mem[0xC021] = 0xAA
+        cpu.bus.mem[0xC020] = 0xBB
+        load_prog(cpu, [0xED, 0xBB])   # OTDR
+        cpu.step()
+        assert cpu.ports.writes == [(0x30, 0xAA), (0x30, 0xBB)]
+        assert cpu.B == 0
+        assert cpu.HL == 0xC01F
+
+    def test_indr(self):
+        # INDR: read backwards
+        cpu = make_cpu()
+        cpu.B = 2; cpu.C = 0x40; cpu.HL = 0xC030
+        cpu.ports.set_port(0x40, 0x12)
+        cpu.ports.set_port(0x40, 0x34)
+        load_prog(cpu, [0xED, 0xBA])   # INDR
+        cpu.step()
+        assert cpu.bus.mem[0xC030] == 0x12
+        assert cpu.bus.mem[0xC02F] == 0x34
+        assert cpu.B == 0
+        assert cpu.HL == 0xC02E
+
+
+class TestInterrupts:
+    """NMI, maskable interrupts (IM 0/1/2), EI delay, HALT, DI/EI."""
+
+    # -----------------------------------------------------------------------
+    # DI / EI
+    # -----------------------------------------------------------------------
+
+    def test_di(self):
+        cpu = make_cpu()
+        cpu.IFF1 = cpu.IFF2 = True
+        load_prog(cpu, [0xF3])          # DI
+        cycles = cpu.step()
+        assert cpu.IFF1 is False
+        assert cpu.IFF2 is False
+        assert cycles == 4
+
+    def test_ei(self):
+        cpu = make_cpu()
+        cpu.IFF1 = cpu.IFF2 = False
+        load_prog(cpu, [0xFB])          # EI
+        cycles = cpu.step()
+        assert cpu.IFF1 is True
+        assert cpu.IFF2 is True
+        assert cycles == 4
+
+    # -----------------------------------------------------------------------
+    # EI delay — interrupt not accepted immediately after EI
+    # -----------------------------------------------------------------------
+
+    def test_ei_delay_blocks_int(self):
+        cpu = make_cpu()
+        cpu.IFF1 = cpu.IFF2 = False
+        cpu._int_pending = True
+        load_prog(cpu, [0xFB, 0x00])    # EI ; NOP
+        cpu.step()                       # EI — sets _ei_delay
+        assert cpu._int_pending          # INT not yet serviced
+        assert cpu.IFF1 is True
+        cpu.step()                       # NOP — _ei_delay cleared, now INT fires
+        # After NOP, step() would normally return 4, but the NEXT step takes INT
+
+    def test_ei_delay_int_fires_after_next(self):
+        cpu = make_cpu()
+        cpu.IFF1 = cpu.IFF2 = True
+        cpu.IM = 1
+        cpu.SP = 0xFFFF
+        load_prog(cpu, [0xFB, 0x00])    # EI ; NOP
+        cpu.step()                       # EI — delay set
+        cpu.step()                       # NOP — delay clears, interrupt NOT yet
+        cpu._int_pending = True          # arrives now
+        cycles = cpu.step()              # NEXT step services it
+        assert cpu.PC == 0x0038
+        assert cycles == 13
+
+    # -----------------------------------------------------------------------
+    # NMI — highest priority, not maskable
+    # -----------------------------------------------------------------------
+
+    def test_nmi_jumps_to_0066(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.PC = 0x1234
+        cpu.IFF1 = True
+        cpu._nmi_pending = True
+        cycles = cpu.step()
+        assert cpu.PC == 0x0066
+        assert cycles == 11
+
+    def test_nmi_pushes_pc(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.PC = 0x5678
+        cpu._nmi_pending = True
+        cpu.step()
+        assert cpu._read16(cpu.SP) == 0x5678
+
+    def test_nmi_clears_iff1_saves_iff2(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.IFF1 = True; cpu.IFF2 = False
+        cpu._nmi_pending = True
+        cpu.step()
+        assert cpu.IFF1 is False
+        assert cpu.IFF2 is True         # IFF2 = old IFF1
+
+    def test_nmi_clears_halted(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.halted = True
+        cpu._nmi_pending = True
+        cpu.step()
+        assert cpu.halted is False
+        assert cpu.PC == 0x0066
+
+    # -----------------------------------------------------------------------
+    # IM 1 maskable interrupt
+    # -----------------------------------------------------------------------
+
+    def test_im1_int_jumps_to_0038(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF; cpu.PC = 0x2000
+        cpu.IFF1 = True; cpu.IM = 1
+        cpu._int_pending = True
+        cycles = cpu.step()
+        assert cpu.PC == 0x0038
+        assert cycles == 13
+
+    def test_im1_int_pushes_pc(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF; cpu.PC = 0x3000
+        cpu.IFF1 = True; cpu.IM = 1
+        cpu._int_pending = True
+        cpu.step()
+        assert cpu._read16(cpu.SP) == 0x3000
+
+    def test_im1_int_clears_iff(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.IFF1 = True; cpu.IFF2 = True; cpu.IM = 1
+        cpu._int_pending = True
+        cpu.step()
+        assert cpu.IFF1 is False
+        assert cpu.IFF2 is False
+
+    def test_int_ignored_when_iff1_false(self):
+        cpu = make_cpu()
+        cpu.IFF1 = False
+        cpu._int_pending = True
+        load_prog(cpu, [0x00])          # NOP
+        cycles = cpu.step()
+        assert cpu.PC == 0x0001         # NOP executed, not interrupted
+        assert cycles == 4
+
+    # -----------------------------------------------------------------------
+    # IM 2 maskable interrupt — vector table
+    # -----------------------------------------------------------------------
+
+    def test_im2_int(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF; cpu.PC = 0x4000
+        cpu.IFF1 = True; cpu.IM = 2; cpu.I = 0x10
+        # Vector address = (I << 8) | 0xFF = 0x10FF; place jump target there
+        cpu.bus.mem[0x10FF] = 0x00
+        cpu.bus.mem[0x1100] = 0x60      # jump target = 0x6000
+        cpu._int_pending = True
+        cycles = cpu.step()
+        assert cpu.PC == 0x6000
+        assert cycles == 19
+
+    # -----------------------------------------------------------------------
+    # HALT interaction
+    # -----------------------------------------------------------------------
+
+    def test_halted_spins_until_nmi(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        load_prog(cpu, [0x76])          # HALT
+        cpu.step()                       # enter halt
+        assert cpu.halted
+        cpu._nmi_pending = True
+        cpu.step()                       # NMI fires, exits halt
+        assert not cpu.halted
+        assert cpu.PC == 0x0066
+
+    def test_halted_int_clears_halt(self):
+        cpu = make_cpu()
+        cpu.SP = 0xFFFF
+        cpu.IFF1 = True; cpu.IM = 1
+        load_prog(cpu, [0x76])
+        cpu.step()                       # HALT
+        cpu._int_pending = True
+        cpu.step()                       # INT fires
+        assert not cpu.halted
+        assert cpu.PC == 0x0038
