@@ -45,8 +45,30 @@ prevent an infinite reload loop.
 Output frequency = TICK_RATE / (2 × period) Hz.
 
 render() returns floats in [-1.0, +1.0].  Each channel contributes ±amp
-where amp = ATTENUATION[volume]; the four-channel sum is divided by 4.0
-so the noise channel (Task 3) can be added without re-normalisation.
+where amp = ATTENUATION[volume]; the four-channel sum is divided by 4.0.
+
+Noise synthesis
+---------------
+The noise channel uses a 16-bit LFSR (initialised to 0x8000).  It is
+clocked by its own down-counter; the noise control register selects the
+clock period and the LFSR feedback mode.
+
+Noise control byte (reg 6) bit layout:
+  bit 2  type: 0 = periodic, 1 = white noise
+  bits 1-0  NF: clock select
+    00 → period 0x10  (TICK_RATE / 32)
+    01 → period 0x20  (TICK_RATE / 64)
+    10 → period 0x40  (TICK_RATE / 128)
+    11 → use tone channel 2's period register value
+
+On each LFSR clock:
+  output_bit = lfsr & 1
+  feedback   = output_bit ^ ((lfsr >> 3) & 1)   if white noise
+             = output_bit                         if periodic
+  lfsr       = (lfsr >> 1) | (feedback << 15)
+
+Writing to reg 6 resets the LFSR to 0x8000.
+The noise output is ±ATTENUATION[vol[3]] according to lfsr bit 0.
 """
 
 import math
@@ -99,6 +121,7 @@ class PSG:
                 self._tone_period[ch] = (self._tone_period[ch] & 0x3F0) | data
             elif reg == 6:                          # noise control
                 self._noise_ctrl = data
+                self._lfsr = 0x8000               # reset LFSR on any noise-ctrl write
             else:                                   # volume (regs 1, 3, 5, 7)
                 ch = reg >> 1
                 self._volume[ch] = data
@@ -113,36 +136,52 @@ class PSG:
                 self._tone_period[ch] = ((value & 0x3F) << 4) | (self._tone_period[ch] & 0x0F)
             elif reg == 6:                          # noise control
                 self._noise_ctrl = value & 0x0F
+                self._lfsr = 0x8000               # reset LFSR on any noise-ctrl write
             else:                                   # volume
                 ch = reg >> 1
                 self._volume[ch] = value & 0x0F
 
     # ------------------------------------------------------------------
+    # Noise period lookup for NF bits 0-2; NF=3 borrows tone channel 2's period.
+    _NOISE_PERIODS = (0x10, 0x20, 0x40)
+
     def render(self, n_samples: int, sample_rate: float) -> list:
         """Synthesise *n_samples* audio samples at *sample_rate* Hz.
 
-        Advances tone channel counters and returns a list of floats in
-        [-1.0, +1.0].  Each tone channel contributes ±ATTENUATION[vol];
-        the sum is divided by 4.0 (reserving headroom for the noise channel
-        that Task 3 will add).
+        Returns a list of floats in [-1.0, +1.0].  All four channels
+        (three tone + one noise) are mixed and divided by 4.0.
         """
         ticks_per_sample = TICK_RATE / sample_rate
+        white_noise = bool(self._noise_ctrl & 0x04)
+        nf          = self._noise_ctrl & 0x03
         out = []
 
         for _ in range(n_samples):
-            # Advance each tone channel
+            # --- Tone channels ---
             for ch in range(3):
                 self._tone_counter[ch] -= ticks_per_sample
-                period = self._tone_period[ch] or 1   # 0 → 1 avoids infinite loop
+                period = self._tone_period[ch] or 1
                 while self._tone_counter[ch] <= 0:
                     self._tone_counter[ch] += period
                     self._tone_flip[ch] = not self._tone_flip[ch]
 
-            # Sum tone channels; noise channel slot left at 0.0 until Task 3
+            # --- Noise channel ---
+            noise_period = (self._tone_period[2] or 1) if nf == 3 else self._NOISE_PERIODS[nf]
+            self._noise_counter -= ticks_per_sample
+            while self._noise_counter <= 0:
+                self._noise_counter += noise_period
+                out_bit  = self._lfsr & 1
+                feedback = (out_bit ^ ((self._lfsr >> 3) & 1)) if white_noise else out_bit
+                self._lfsr = (self._lfsr >> 1) | (feedback << 15)
+
+            # --- Mix ---
             mix = 0.0
             for ch in range(3):
                 amp = ATTENUATION[self._volume[ch]]
                 mix += amp if self._tone_flip[ch] else -amp
+
+            noise_amp = ATTENUATION[self._volume[3]]
+            mix += noise_amp if (self._lfsr & 1) else -noise_amp
 
             out.append(mix / 4.0)
 
