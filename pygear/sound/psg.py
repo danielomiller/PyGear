@@ -1,4 +1,4 @@
-"""SN76489 PSG — register file, write decoder, and attenuation table.
+"""SN76489 PSG — register file, write decoder, attenuation table, and synthesis.
 
 The SN76489 has eight internal registers accessed through a single write port:
 
@@ -33,6 +33,20 @@ Clock
 -----
 PSG_CLOCK = 3,579,545 Hz (Z80 master clock).
 TICK_RATE = PSG_CLOCK / 16 — rate at which tone counters decrement.
+
+Tone synthesis
+--------------
+Each tone channel runs an internal down-counter initialised to its period.
+The counter decrements by ticks_per_sample = TICK_RATE / sample_rate each
+audio sample.  When it reaches ≤ 0 it reloads (counter += period) and
+the square-wave output flips polarity.  A period of 0 is treated as 1 to
+prevent an infinite reload loop.
+
+Output frequency = TICK_RATE / (2 × period) Hz.
+
+render() returns floats in [-1.0, +1.0].  Each channel contributes ±amp
+where amp = ATTENUATION[volume]; the four-channel sum is divided by 4.0
+so the noise channel (Task 3) can be added without re-normalisation.
 """
 
 import math
@@ -51,10 +65,10 @@ class PSG:
         self._noise_ctrl   = 0                # 4-bit noise control
         self._latch_reg    = 0                # last latched register index 0-7
 
-        # Synthesis state initialised here; populated fully by render() in Task 2/3
-        self._tone_counter = [0.0, 0.0, 0.0]
-        self._tone_flip    = [False, False, False]
-        self._lfsr         = 0x8000
+        # Synthesis state
+        self._tone_counter  = [0.0, 0.0, 0.0]
+        self._tone_flip     = [False, False, False]
+        self._lfsr          = 0x8000
         self._noise_counter = 0.0
 
     # ------------------------------------------------------------------
@@ -102,3 +116,34 @@ class PSG:
             else:                                   # volume
                 ch = reg >> 1
                 self._volume[ch] = value & 0x0F
+
+    # ------------------------------------------------------------------
+    def render(self, n_samples: int, sample_rate: float) -> list:
+        """Synthesise *n_samples* audio samples at *sample_rate* Hz.
+
+        Advances tone channel counters and returns a list of floats in
+        [-1.0, +1.0].  Each tone channel contributes ±ATTENUATION[vol];
+        the sum is divided by 4.0 (reserving headroom for the noise channel
+        that Task 3 will add).
+        """
+        ticks_per_sample = TICK_RATE / sample_rate
+        out = []
+
+        for _ in range(n_samples):
+            # Advance each tone channel
+            for ch in range(3):
+                self._tone_counter[ch] -= ticks_per_sample
+                period = self._tone_period[ch] or 1   # 0 → 1 avoids infinite loop
+                while self._tone_counter[ch] <= 0:
+                    self._tone_counter[ch] += period
+                    self._tone_flip[ch] = not self._tone_flip[ch]
+
+            # Sum tone channels; noise channel slot left at 0.0 until Task 3
+            mix = 0.0
+            for ch in range(3):
+                amp = ATTENUATION[self._volume[ch]]
+                mix += amp if self._tone_flip[ch] else -amp
+
+            out.append(mix / 4.0)
+
+        return out
