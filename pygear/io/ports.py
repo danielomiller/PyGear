@@ -15,21 +15,23 @@ all others  0xFF
 
 Write map
 ---------
+0x7E        PSG data port
 0xBE        VDP data port
 0xBF        VDP control port
-all others  ignored (PSG at 0x7E handled in Step 5)
+all others  ignored
 """
 
-_READ_FF = frozenset({0xC1, 0xDD})
+_READ_FF   = frozenset({0xC1, 0xDD})
 _JOYPAD_C0 = frozenset({0xC0, 0xDC})
 _VDP_READ  = frozenset({0x7E, 0x7F, 0xBE, 0xBF})
 _VDP_WRITE = frozenset({0xBE, 0xBF})
 
 
 class IOPorts:
-    def __init__(self, vdp, joypad):
+    def __init__(self, vdp, joypad, psg=None):
         self._vdp    = vdp
         self._joypad = joypad
+        self._psg    = psg
 
     def read(self, port: int) -> int:
         port &= 0xFF
@@ -46,5 +48,7 @@ class IOPorts:
     def write(self, port: int, value: int) -> None:
         port  &= 0xFF
         value &= 0xFF
-        if port in _VDP_WRITE:
+        if port == 0x7E and self._psg is not None:
+            self._psg.write(value)
+        elif port in _VDP_WRITE:
             self._vdp.port_write(port, value)
