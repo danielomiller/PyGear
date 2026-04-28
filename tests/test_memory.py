@@ -1,8 +1,8 @@
 """Tests for the memory subsystem — bus, mapper, RAM."""
 
-import io
 import sys
 import os
+import tempfile
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -24,12 +24,8 @@ def _make_cart(size_kb: int = 64) -> Cartridge:
     for bank in range(size // 0x4000):
         for offset in range(0x4000):
             data[bank * 0x4000 + offset] = bank & 0xFF
-    # Write a recognisable byte at offset 0 of bank 0 (first 1 KB area)
     data[0x0000] = 0xAA
     data[0x0200] = 0xBB
-
-    # Persist to a temp file and load via Cartridge
-    import tempfile, pathlib
     tmp = tempfile.NamedTemporaryFile(suffix=".gg", delete=False)
     tmp.write(data)
     tmp.close()
@@ -38,8 +34,34 @@ def _make_cart(size_kb: int = 64) -> Cartridge:
     return cart
 
 
+def _cart_from_bytes(data: bytes) -> Cartridge:
+    """Load a Cartridge from raw bytes."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".gg", delete=False)
+    tmp.write(data)
+    tmp.close()
+    cart = Cartridge(tmp.name)
+    os.unlink(tmp.name)
+    return cart
+
+
+_SEGA_MAGIC = b"TMR SEGA"
+
+
+def _rom_with_header(size: int, offset: int,
+                     product_code: int = 0, version: int = 0,
+                     region: int = 0, rom_size_byte: int = 0) -> Cartridge:
+    """Build a ROM of *size* bytes with a valid Sega header at *offset*."""
+    data = bytearray(size)
+    data[offset : offset + 8] = _SEGA_MAGIC
+    data[offset + 12] = product_code & 0xFF
+    data[offset + 13] = (product_code >> 8) & 0xFF
+    data[offset + 14] = ((product_code >> 12) & 0xF0) | (version & 0x0F)
+    data[offset + 15] = ((region & 0x0F) << 4) | (rom_size_byte & 0x0F)
+    return _cart_from_bytes(bytes(data))
+
+
 # ---------------------------------------------------------------------------
-# RAM tests
+# TestRAM
 
 class TestRAM:
     def test_read_after_write(self):
@@ -50,11 +72,11 @@ class TestRAM:
     def test_8kb_wrap(self):
         ram = RAM()
         ram.write(0x0000, 0x42)
-        assert ram.read(0x2000) == 0x42  # mirrors at +8 KB
+        assert ram.read(0x2000) == 0x42
 
     def test_byte_masking(self):
         ram = RAM()
-        ram.write(0x0005, 0x1FF)  # only low 8 bits stored
+        ram.write(0x0005, 0x1FF)
         assert ram.read(0x0005) == 0xFF
 
     def test_reset(self):
@@ -65,23 +87,23 @@ class TestRAM:
 
 
 # ---------------------------------------------------------------------------
-# Cartridge tests
+# TestCartridge
 
 class TestCartridge:
-    def test_bank_count(self):
-        cart = _make_cart(64)
-        assert cart.bank_count == 4  # 64 KB / 16 KB
+
+    # --- basic read / bank_count (original tests) --------------------------
+
+    def test_bank_count_64kb(self):
+        assert _make_cart(64).bank_count == 4
 
     def test_read_bank_data(self):
         cart = _make_cart(64)
-        # Each bank is filled with its bank index; use offsets not overlapping markers
         assert cart.read(0, 0x1000) == 0x00
         assert cart.read(1, 0x1000) == 0x01
         assert cart.read(2, 0x1000) == 0x02
 
     def test_read_wraps_past_rom_end(self):
         cart = _make_cart(32)
-        # Reading bank 4 of a 32 KB (2-bank) ROM: 4 % 2 = 0 → same as bank 0
         assert cart.read(4, 0x1000) == cart.read(0, 0x1000)
 
     def test_fixed_1kb_marker(self):
@@ -89,63 +111,158 @@ class TestCartridge:
         assert cart.read_raw(0x0000) == 0xAA
         assert cart.read_raw(0x0200) == 0xBB
 
+    # --- bank_count for various sizes --------------------------------------
+
+    def test_bank_count_16kb(self):
+        assert _make_cart(16).bank_count == 1
+
+    def test_bank_count_32kb(self):
+        assert _make_cart(32).bank_count == 2
+
+    def test_bank_count_512kb(self):
+        assert _make_cart(512).bank_count == 32
+
+    def test_bank_count_minimum_1_for_tiny_rom(self):
+        cart = _cart_from_bytes(bytes(8 * 1024))
+        assert cart.bank_count == 1
+
+    # --- read_raw wrapping -------------------------------------------------
+
+    def test_read_raw_wraps_at_rom_end(self):
+        cart = _make_cart(16)
+        assert cart.read_raw(0) == cart.read_raw(16 * 1024)
+
+    # --- header: absent magic ----------------------------------------------
+
+    def test_header_invalid_when_no_magic(self):
+        cart = _cart_from_bytes(bytes(32 * 1024))
+        assert cart.header_valid is False
+
+    def test_header_invalid_when_rom_too_small_for_any_probe(self):
+        # All three probe offsets (0x1FF0, 0x3FF0, 0x7FF0) exceed 4 KB
+        cart = _cart_from_bytes(bytes(4 * 1024))
+        assert cart.header_valid is False
+
+    def test_header_fields_default_to_zero_when_absent(self):
+        cart = _cart_from_bytes(bytes(32 * 1024))
+        assert cart.product_code  == 0
+        assert cart.version       == 0
+        assert cart.region        == 0
+        assert cart.rom_size_byte == 0
+
+    # --- header: detection at each probe offset ----------------------------
+
+    def test_header_detected_at_offset_0x1ff0(self):
+        cart = _rom_with_header(size=8 * 1024, offset=0x1FF0)
+        assert cart.header_valid is True
+
+    def test_header_detected_at_offset_0x3ff0(self):
+        cart = _rom_with_header(size=16 * 1024, offset=0x3FF0)
+        assert cart.header_valid is True
+
+    def test_header_detected_at_offset_0x7ff0(self):
+        cart = _rom_with_header(size=32 * 1024, offset=0x7FF0)
+        assert cart.header_valid is True
+
+    def test_first_matching_offset_wins(self):
+        # 0x1FF0 and 0x3FF0 both have magic; 0x1FF0 has product_code low=0x11
+        data = bytearray(32 * 1024)
+        data[0x1FF0 : 0x1FF0 + 8] = _SEGA_MAGIC
+        data[0x1FF0 + 12] = 0x11
+        data[0x3FF0 : 0x3FF0 + 8] = _SEGA_MAGIC
+        data[0x3FF0 + 12] = 0x22
+        cart = _cart_from_bytes(bytes(data))
+        assert cart.header_valid is True
+        assert cart.product_code & 0xFF == 0x11
+
+    # --- header: field extraction ------------------------------------------
+
+    def test_product_code_low_byte(self):
+        assert _rom_with_header(8*1024, 0x1FF0, product_code=0x42).product_code == 0x42
+
+    def test_product_code_two_bytes(self):
+        assert _rom_with_header(8*1024, 0x1FF0, product_code=0x0142).product_code == 0x0142
+
+    def test_product_code_full_20_bits(self):
+        assert _rom_with_header(8*1024, 0x1FF0, product_code=0x30142).product_code == 0x30142
+
+    def test_version_extracted(self):
+        assert _rom_with_header(8*1024, 0x1FF0, version=7).version == 7
+
+    def test_version_max(self):
+        assert _rom_with_header(8*1024, 0x1FF0, version=0xF).version == 0xF
+
+    def test_region_extracted(self):
+        assert _rom_with_header(8*1024, 0x1FF0, region=5).region == 5
+
+    def test_rom_size_byte_extracted(self):
+        assert _rom_with_header(8*1024, 0x1FF0, rom_size_byte=0x0E).rom_size_byte == 0x0E
+
+    # --- copier header stripping -------------------------------------------
+
+    def test_copier_header_stripped_size(self):
+        padded = bytes(512) + bytes(32 * 1024)
+        assert _cart_from_bytes(padded).size == 32 * 1024
+
+    def test_copier_header_bank_count_after_strip(self):
+        padded = bytes(512) + bytes(32 * 1024)
+        assert _cart_from_bytes(padded).bank_count == 2
+
+    def test_copier_header_data_accessible_after_strip(self):
+        rom = bytearray(32 * 1024)
+        rom[0x100] = 0xAB
+        padded = bytes(512) + bytes(rom)
+        assert _cart_from_bytes(padded).read_raw(0x100) == 0xAB
+
+    def test_regular_rom_not_stripped(self):
+        rom = bytearray(32 * 1024)
+        rom[0] = 0xCC
+        cart = _cart_from_bytes(bytes(rom))
+        assert cart.size == 32 * 1024
+        assert cart.read_raw(0) == 0xCC
+
 
 # ---------------------------------------------------------------------------
-# SegaMapper tests
+# TestSegaMapper
 
 class TestSegaMapper:
-    def _make(self, size_kb=64):
-        return _make_cart(size_kb), None
-
     def test_default_slot_banks(self):
-        cart = _make_cart(64)
-        mapper = SegaMapper(cart)
+        mapper = SegaMapper(_make_cart(64))
         assert mapper.slot_banks == (0, 1, 2)
 
     def test_slot0_bank_select(self):
-        cart = _make_cart(64)
-        mapper = SegaMapper(cart)
-        mapper.write_register(1, 3)  # $FFFD = 3 → slot 0 = bank 3
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(1, 3)
         assert mapper.slot_banks[0] == 3
 
     def test_slot1_bank_select(self):
-        cart = _make_cart(64)
-        mapper = SegaMapper(cart)
-        mapper.write_register(2, 2)  # $FFFE = 2 → slot 1 = bank 2
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(2, 2)
         assert mapper.slot_banks[1] == 2
 
     def test_slot2_bank_select(self):
-        cart = _make_cart(64)
-        mapper = SegaMapper(cart)
-        mapper.write_register(3, 1)  # $FFFF = 1 → slot 2 = bank 1
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(3, 1)
         assert mapper.slot_banks[2] == 1
 
     def test_fixed_1kb_unaffected_by_mapper(self):
-        cart = _make_cart(64)
-        mapper = SegaMapper(cart)
-        # Map slot 0 to bank 3
+        mapper = SegaMapper(_make_cart(64))
         mapper.write_register(1, 3)
-        # $0000–$03FF should still read from bank 0
         assert mapper.read(0x0000) == 0xAA
         assert mapper.read(0x0200) == 0xBB
 
     def test_slot0_read_reflects_bank(self):
-        cart = _make_cart(64)
-        mapper = SegaMapper(cart)
+        mapper = SegaMapper(_make_cart(64))
         mapper.write_register(1, 3)
-        # $0400 onward in slot 0 should now come from bank 3 (value = 0x03)
         assert mapper.read(0x0400) == 0x03
 
     def test_bank_wraps_at_rom_boundary(self):
-        cart = _make_cart(32)  # 2 banks
-        mapper = SegaMapper(cart)
-        # Writing bank 5 to slot 0 of a 2-bank ROM: 5 % 2 = 1
-        mapper.write_register(1, 5)
+        mapper = SegaMapper(_make_cart(32))
+        mapper.write_register(1, 5)   # 5 % 2 = 1
         assert mapper.slot_banks[0] == 1
 
     def test_reset(self):
-        cart = _make_cart(64)
-        mapper = SegaMapper(cart)
+        mapper = SegaMapper(_make_cart(64))
         mapper.write_register(1, 3)
         mapper.write_register(2, 2)
         mapper.write_register(3, 1)
@@ -154,65 +271,47 @@ class TestSegaMapper:
 
 
 # ---------------------------------------------------------------------------
-# MemoryBus integration tests
+# TestMemoryBus
 
 class TestMemoryBus:
     def test_rom_read_slot0(self):
-        cart = _make_cart(64)
-        bus = MemoryBus(cart)
-        # Bank 0 fills $0400–$3FFF, value = 0x00
-        assert bus.read(0x0400) == 0x00
+        assert MemoryBus(_make_cart(64)).read(0x0400) == 0x00
 
     def test_rom_read_slot1(self):
-        cart = _make_cart(64)
-        bus = MemoryBus(cart)
-        # Bank 1 maps to $4000–$7FFF, value = 0x01
-        assert bus.read(0x4000) == 0x01
+        assert MemoryBus(_make_cart(64)).read(0x4000) == 0x01
 
     def test_rom_read_slot2(self):
-        cart = _make_cart(64)
-        bus = MemoryBus(cart)
-        # Bank 2 maps to $8000–$BFFF, value = 0x02
-        assert bus.read(0x8000) == 0x02
+        assert MemoryBus(_make_cart(64)).read(0x8000) == 0x02
 
     def test_ram_read_write(self):
-        cart = _make_cart(64)
-        bus = MemoryBus(cart)
+        bus = MemoryBus(_make_cart(64))
         bus.write(0xC000, 0x55)
         assert bus.read(0xC000) == 0x55
 
     def test_ram_mirror(self):
-        cart = _make_cart(64)
-        bus = MemoryBus(cart)
+        bus = MemoryBus(_make_cart(64))
         bus.write(0xC100, 0x33)
-        assert bus.read(0xE100) == 0x33  # $E000 mirrors $C000
+        assert bus.read(0xE100) == 0x33
 
     def test_rom_write_ignored(self):
-        cart = _make_cart(64)
-        bus = MemoryBus(cart)
+        bus = MemoryBus(_make_cart(64))
         original = bus.read(0x1000)
         bus.write(0x1000, original ^ 0xFF)
-        assert bus.read(0x1000) == original  # write to ROM is a no-op
+        assert bus.read(0x1000) == original
 
     def test_mapper_register_write_via_bus(self):
-        cart = _make_cart(64)
-        bus = MemoryBus(cart)
-        # Writing to $FFFF (RAM mirror) also updates slot 2 mapping
+        bus = MemoryBus(_make_cart(64))
         bus.write(0xFFFF, 3)
         assert bus.mapper.slot_banks[2] == 3
-        # Reading slot 2 should now reflect bank 3 (value = 0x03)
         assert bus.read(0x8000) == 0x03
 
     def test_mapper_slot0_via_fffd(self):
-        cart = _make_cart(64)
-        bus = MemoryBus(cart)
+        bus = MemoryBus(_make_cart(64))
         bus.write(0xFFFD, 3)
-        assert bus.read(0x0400) == 0x03  # now reads bank 3
+        assert bus.read(0x0400) == 0x03
 
     def test_fixed_1kb_immutable(self):
-        cart = _make_cart(64)
-        bus = MemoryBus(cart)
-        # Even after remapping slot 0, $0000–$03FF is always bank 0
+        bus = MemoryBus(_make_cart(64))
         bus.write(0xFFFD, 3)
         assert bus.read(0x0000) == 0xAA
         assert bus.read(0x0200) == 0xBB
