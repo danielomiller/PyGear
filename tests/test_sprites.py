@@ -157,3 +157,205 @@ class TestSATParser:
         sat_terminate(vram, regs, 1)
         _, _, tile_num = parse_sat(vram, regs)[0]
         assert tile_num == 7                  # odd tile unchanged without tall mode
+
+
+# ---------------------------------------------------------------------------
+# TestSpritesOnLine
+# ---------------------------------------------------------------------------
+
+class TestSpritesOnLine:
+
+    # --- visibility window (normal 8px height) ------------------------------
+
+    def test_sprite_first_visible_line(self):
+        # Y=10 → first visible on line 11 (dy=0)
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 11)
+        assert len(visible) == 1
+
+    def test_sprite_not_visible_on_line_before_start(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 10)
+        assert visible == []
+
+    def test_sprite_last_visible_line(self):
+        # Y=10, height=8 → last visible on line 18 (dy=7)
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 18)
+        assert len(visible) == 1
+
+    def test_sprite_not_visible_after_last_line(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 19)
+        assert visible == []
+
+    # --- dy value in result -------------------------------------------------
+
+    def test_dy_is_zero_on_first_visible_line(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        (_, _, dy), = sprites_on_line(vram, regs, 11)[0]
+        assert dy == 0
+
+    def test_dy_is_correct_mid_sprite(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        (_, _, dy), = sprites_on_line(vram, regs, 15)[0]
+        assert dy == 4    # (15 - 11) = 4
+
+    def test_dy_is_7_on_last_visible_line(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        (_, _, dy), = sprites_on_line(vram, regs, 18)[0]
+        assert dy == 7
+
+    # --- x and tile_num in result -------------------------------------------
+
+    def test_x_and_tile_num_preserved(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 10, 88, 42)
+        sat_terminate(vram, regs, 1)
+        (x, tile_num, _), = sprites_on_line(vram, regs, 11)[0]
+        assert x == 88
+        assert tile_num == 42
+
+    # --- tall mode (height = 16) --------------------------------------------
+
+    def test_tall_last_visible_line(self):
+        # R1 bit 1 → height 16; Y=10 → last visible on line 26 (dy=15)
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x02)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 26)
+        assert len(visible) == 1
+
+    def test_tall_not_visible_after_last_line(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x02)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 27)
+        assert visible == []
+
+    # --- zoom mode (height = 16) --------------------------------------------
+
+    def test_zoom_last_visible_line(self):
+        # R1 bit 0 → zoom; height doubles to 16
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x01)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 26)
+        assert len(visible) == 1
+
+    def test_zoom_not_visible_after_last_line(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x01)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 27)
+        assert visible == []
+
+    # --- tall + zoom (height = 32) ------------------------------------------
+
+    def test_tall_zoom_last_visible_line(self):
+        # R1 bits 0+1 → tall + zoom; height = 32
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x03)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 42)
+        assert len(visible) == 1
+
+    def test_tall_zoom_not_visible_after_last_line(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x03)
+        sat_write(vram, regs, 0, 10, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 43)
+        assert visible == []
+
+    # --- 8-sprite per-line limit and overflow -------------------------------
+
+    def test_exactly_8_sprites_no_overflow(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        for n in range(8):
+            sat_write(vram, regs, n, 10, n * 8, n)
+        sat_terminate(vram, regs, 8)
+        visible, overflow = sprites_on_line(vram, regs, 11)
+        assert len(visible) == 8
+        assert overflow is False
+
+    def test_9th_sprite_triggers_overflow(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        for n in range(9):
+            sat_write(vram, regs, n, 10, n * 8, n)
+        sat_terminate(vram, regs, 9)
+        visible, overflow = sprites_on_line(vram, regs, 11)
+        assert len(visible) == 8
+        assert overflow is True
+
+    def test_overflow_visible_list_capped_at_8(self):
+        # Even with 12 sprites on the line, visible stays at 8
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        for n in range(12):
+            sat_write(vram, regs, n, 10, 0, 0)
+        sat_terminate(vram, regs, 12)
+        visible, overflow = sprites_on_line(vram, regs, 11)
+        assert len(visible) == 8
+        assert overflow is True
+
+    # --- terminator stops before limit --------------------------------------
+
+    def test_terminator_stops_before_overflow(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        for n in range(3):
+            sat_write(vram, regs, n, 10, n * 8, n)
+        sat_terminate(vram, regs, 3)
+        visible, overflow = sprites_on_line(vram, regs, 11)
+        assert len(visible) == 3
+        assert overflow is False
+
+    # --- Y wrap-around ------------------------------------------------------
+
+    def test_y_0xff_visible_on_line_0(self):
+        # Y=0xFF → dy = (0 - 0) & 0xFF = 0 → visible on line 0
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 0xFF, 5, 2)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 0)
+        assert len(visible) == 1
+
+    def test_y_0xff_not_visible_on_line_8(self):
+        # dy = (8 - 0) & 0xFF = 8 ≥ height(8) → not visible
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_write(vram, regs, 0, 0xFF, 0, 0)
+        sat_terminate(vram, regs, 1)
+        visible, _ = sprites_on_line(vram, regs, 8)
+        assert visible == []
