@@ -648,3 +648,186 @@ class TestSpriteLineRenderer:
         _, overflow, _ = render_sprite_line(vram, regs, 1)
         assert overflow is True
 
+
+# ---------------------------------------------------------------------------
+# TestComposition
+# ---------------------------------------------------------------------------
+
+# Helpers for _compose_line (operates on any equal-length lists)
+def bg_px(cram_idx, priority=False):
+    return (cram_idx, priority)
+
+def sp_px(cram_idx=0, has_pixel=False):
+    return (cram_idx, has_pixel)
+
+# VDP helpers for status-bit tests
+_COMP_SAT = 0x3F00   # R5=0x7E → (0x7E & 0x7E) << 7 = 0x3F00
+
+def make_comp_vdp():
+    vdp = VDP()
+    vdp.regs[5] = 0x7E
+    return vdp
+
+def vdp_add_sprite(vdp, n, y, x, tile_num):
+    vdp.vram[_COMP_SAT + n]               = y
+    vdp.vram[_COMP_SAT + 128 + n * 2]     = x
+    vdp.vram[_COMP_SAT + 128 + n * 2 + 1] = tile_num
+
+def vdp_terminate(vdp, n):
+    vdp.vram[_COMP_SAT + n] = 0xD0
+
+def step_lines(vdp, count):
+    for _ in range(count):
+        vdp.step(CYCLES_PER_LINE)
+
+
+class TestComposition:
+
+    # --- _compose_line pixel rules -----------------------------------------
+
+    def test_sprite_wins_over_non_priority_bg(self):
+        vdp = VDP()
+        bg = [bg_px(1, False)] * 256
+        sp = [sp_px(17, True)]  * 256
+        result = vdp._compose_line(bg, sp)
+        assert result[0] == 17
+
+    def test_priority_bg_opaque_hides_sprite(self):
+        vdp = VDP()
+        # bg_cram=1, priority=True, 1%16=1 (opaque) → bg wins
+        bg = [bg_px(1, True)]  * 256
+        sp = [sp_px(17, True)] * 256
+        result = vdp._compose_line(bg, sp)
+        assert result[0] == 1
+
+    def test_priority_bg_palette0_color0_shows_sprite(self):
+        # bg_cram=0 → 0%16=0 (transparent) → sprite wins despite priority
+        vdp = VDP()
+        bg = [bg_px(0, True)]  * 256
+        sp = [sp_px(17, True)] * 256
+        result = vdp._compose_line(bg, sp)
+        assert result[0] == 17
+
+    def test_priority_bg_palette1_color0_shows_sprite(self):
+        # bg_cram=16 → 16%16=0 (palette 1 color 0) → still transparent → sprite wins
+        vdp = VDP()
+        bg = [bg_px(16, True)] * 256
+        sp = [sp_px(17, True)] * 256
+        result = vdp._compose_line(bg, sp)
+        assert result[0] == 17
+
+    def test_no_sprite_pixel_shows_bg(self):
+        vdp = VDP()
+        bg = [bg_px(5, False)] * 256
+        sp = [sp_px(0, False)] * 256
+        result = vdp._compose_line(bg, sp)
+        assert result[0] == 5
+
+    def test_no_sprite_pixel_shows_bg_even_with_priority(self):
+        vdp = VDP()
+        bg = [bg_px(3, True)]  * 256
+        sp = [sp_px(17, False)] * 256
+        result = vdp._compose_line(bg, sp)
+        assert result[0] == 3
+
+    def test_output_length_is_256(self):
+        vdp = VDP()
+        bg = [bg_px(1, False)] * 256
+        sp = [sp_px(17, True)] * 256
+        assert len(vdp._compose_line(bg, sp)) == 256
+
+    def test_mixed_all_four_cases(self):
+        # Per-pixel: sprite/no-prio-bg, sprite/prio-bg/transparent, bg/prio-bg/opaque, bg/no-sprite
+        vdp = VDP()
+        bg = [bg_px(1, False), bg_px(0, True), bg_px(2, True), bg_px(4, False)]
+        sp = [sp_px(17, True), sp_px(18, True), sp_px(19, True), sp_px(0, False)]
+        result = vdp._compose_line(bg, sp)
+        assert result[0] == 17   # sprite over non-priority bg
+        assert result[1] == 18   # sprite wins: priority bg but transparent (0%16=0)
+        assert result[2] == 2    # bg wins: priority + opaque (2%16=2)
+        assert result[3] == 4    # bg wins: no sprite pixel
+
+    def test_bg_cram_values_preserved_in_output(self):
+        vdp = VDP()
+        bg = [bg_px(n, False) for n in range(256)]
+        sp = [sp_px(0, False)] * 256
+        result = vdp._compose_line(bg, sp)
+        assert result == list(range(256))
+
+    def test_sprite_cram_values_preserved_in_output(self):
+        vdp = VDP()
+        bg = [bg_px(0, False)] * 256
+        sp = [sp_px(n % 16 + 16, True) for n in range(256)]
+        result = vdp._compose_line(bg, sp)
+        assert result == [n % 16 + 16 for n in range(256)]
+
+    # --- VDP status bits via step() ----------------------------------------
+
+    def test_overflow_bit_set_in_status(self):
+        # 9 sprites on line 11 → overflow → status bit 6 set
+        vdp = make_comp_vdp()
+        for n in range(9):
+            vdp_add_sprite(vdp, n, 10, n * 8, 0)
+        vdp_terminate(vdp, 9)
+        step_lines(vdp, 12)           # renders lines 0-11
+        assert vdp.status & 0x40
+
+    def test_overflow_bit_not_set_with_8_sprites(self):
+        vdp = make_comp_vdp()
+        for n in range(8):
+            vdp_add_sprite(vdp, n, 10, n * 8, 0)
+        vdp_terminate(vdp, 8)
+        step_lines(vdp, 12)
+        assert not (vdp.status & 0x40)
+
+    def test_collision_bit_set_in_status(self):
+        # Two overlapping sprites with non-transparent pixels → status bit 5
+        vdp = make_comp_vdp()
+        vdp.vram[0] = 0xFF                     # tile 0 row 0 plane 0: all color 1
+        vdp_add_sprite(vdp, 0, 10, 0, 0)       # X=0,  pixels 0-7
+        vdp_add_sprite(vdp, 1, 10, 4, 0)       # X=4,  pixels 4-11 → overlap 4-7
+        vdp_terminate(vdp, 2)
+        step_lines(vdp, 12)
+        assert vdp.status & 0x20
+
+    def test_collision_bit_not_set_without_overlap(self):
+        vdp = make_comp_vdp()
+        vdp.vram[0] = 0xFF
+        vdp_add_sprite(vdp, 0, 10,  0, 0)      # pixels 0-7
+        vdp_add_sprite(vdp, 1, 10, 16, 0)      # pixels 16-23 — no overlap
+        vdp_terminate(vdp, 2)
+        step_lines(vdp, 12)
+        assert not (vdp.status & 0x20)
+
+    def test_both_status_bits_set_simultaneously(self):
+        # 9 sprites (overflow) and two of them overlap (collision) on same line
+        vdp = make_comp_vdp()
+        vdp.vram[0] = 0xFF                     # tile 0: all color 1
+        for n in range(9):
+            vdp_add_sprite(vdp, n, 10, 0, 0)   # all at X=0 → collision on any two
+        vdp_terminate(vdp, 9)
+        step_lines(vdp, 12)
+        assert vdp.status & 0x40               # overflow
+        assert vdp.status & 0x20               # collision
+
+    def test_status_bits_accumulate_across_lines(self):
+        # Overflow on lines 11-18 (9 sprites at Y=10), then collision on line 20
+        # (2 sprites at Y=19, appearing after the overflow sprites finish).
+        # Placing collision sprites after the overflow window ensures they aren't
+        # shadowed by the 8-sprite limit on lines 11-18.
+        vdp = make_comp_vdp()
+        vdp.vram[0] = 0xFF                     # tile 0 row 0 plane 0: all color 1
+        for n in range(9):
+            vdp_add_sprite(vdp, n, 10, n * 8, 0)   # Y=10, visible lines 11-18
+        # Slots 9 and 10: colliding sprites at Y=19 → visible lines 20-27
+        vdp.vram[_COMP_SAT + 9]                = 19
+        vdp.vram[_COMP_SAT + 128 + 9 * 2]      = 0
+        vdp.vram[_COMP_SAT + 128 + 9 * 2 + 1]  = 0
+        vdp.vram[_COMP_SAT + 10]               = 19
+        vdp.vram[_COMP_SAT + 128 + 10 * 2]     = 4
+        vdp.vram[_COMP_SAT + 128 + 10 * 2 + 1] = 0
+        vdp_terminate(vdp, 11)
+        step_lines(vdp, 21)        # renders through line 20
+        assert vdp.status & 0x40   # overflow from lines 11-18
+        assert vdp.status & 0x20   # collision from line 20
+
