@@ -359,3 +359,292 @@ class TestSpritesOnLine:
         sat_terminate(vram, regs, 1)
         visible, _ = sprites_on_line(vram, regs, 8)
         assert visible == []
+
+
+# ---------------------------------------------------------------------------
+# TestSpriteLineRenderer
+# ---------------------------------------------------------------------------
+
+def write_tile_row(vram, tile_num, row, b0=0, b1=0, b2=0, b3=0, tile_base=0):
+    """Write the four bitplane bytes for one row of a tile."""
+    addr = tile_base + tile_num * 32 + row * 4
+    vram[ addr      & 0x3FFF] = b0
+    vram[(addr + 1) & 0x3FFF] = b1
+    vram[(addr + 2) & 0x3FFF] = b2
+    vram[(addr + 3) & 0x3FFF] = b3
+
+
+def setup_sprite(vram, regs, n, y, x, tile_num):
+    """Convenience wrapper: write sprite slot *n* and a terminator at n+1."""
+    sat_write(vram, regs, n, y, x, tile_num)
+    sat_terminate(vram, regs, n + 1)
+
+
+class TestSpriteLineRenderer:
+
+    # --- all-transparent defaults ------------------------------------------
+
+    def test_no_sprites_all_transparent(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        sat_terminate(vram, regs, 0)
+        pixels, ov, col = render_sprite_line(vram, regs, 0)
+        assert len(pixels) == 256
+        assert all(not p[1] for p in pixels)
+        assert ov is False
+        assert col is False
+
+    def test_color_0_tile_is_all_transparent(self):
+        # Tile 0 is all zeros → every pixel is color index 0 → transparent
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        setup_sprite(vram, regs, 0, 0, 0, 0)    # Y=0 → line 1
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert all(not p[1] for p in pixels)
+
+    # --- palette 1 cram index mapping --------------------------------------
+
+    def test_color_1_maps_to_cram_17(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b0=0xFF)    # plane 0 all set → color 1
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert pixels[0] == (17, True)
+
+    def test_color_15_maps_to_cram_31(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b0=0xFF, b1=0xFF, b2=0xFF, b3=0xFF)
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert pixels[0] == (31, True)
+
+    def test_color_2_maps_to_cram_18(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b1=0xFF)    # plane 1 only → color 2
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert pixels[0] == (18, True)
+
+    # --- X positioning and pixel pattern -----------------------------------
+
+    def test_sprite_at_x10_covers_pixels_10_to_17(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b0=0xFF)
+        setup_sprite(vram, regs, 0, 0, 10, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert not pixels[9][1]
+        assert all(pixels[x][1] for x in range(10, 18))
+        assert not pixels[18][1]
+
+    def test_sprite_at_x0_covers_pixels_0_to_7(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b0=0xFF)
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert all(pixels[x][1] for x in range(8))
+        assert not pixels[8][1]
+
+    def test_checkerboard_0xAA_odd_cols_transparent(self):
+        # 0xAA = 10101010: bit7,5,3,1 set → cols 0,2,4,6 have color 1
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b0=0xAA)
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        for col in range(8):
+            if col % 2 == 0:
+                assert pixels[col][1], f"col {col} should have pixel"
+            else:
+                assert not pixels[col][1], f"col {col} should be transparent"
+
+    # --- tile row selection ------------------------------------------------
+
+    def test_correct_tile_row_used_for_dy(self):
+        # dy=3 → tile row 3; only row 3 has data, others are zero
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 3, b0=0xFF)    # row 3 has pixels
+        setup_sprite(vram, regs, 0, 0, 0, 0)   # Y=0 → line 1+dy
+        pixels, _, _ = render_sprite_line(vram, regs, 4)   # line 4 → dy=3
+        assert pixels[0][1]
+
+    def test_different_dy_uses_different_row(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 2, b0=0xFF)    # only row 2 has data
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pix_row1, _, _ = render_sprite_line(vram, regs, 2)   # dy=1 → row 1
+        pix_row3, _, _ = render_sprite_line(vram, regs, 3)   # dy=2 → row 2
+        assert not pix_row1[0][1]
+        assert pix_row3[0][1]
+
+    # --- tile pattern base (R6) --------------------------------------------
+
+    def test_tile_base_r6_0_reads_from_0x0000(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r6=0x00)
+        write_tile_row(vram, 0, 0, b0=0xFF, tile_base=0x0000)
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert pixels[0][1]
+
+    def test_tile_base_r6_4_reads_from_0x2000(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r6=0x04)
+        write_tile_row(vram, 0, 0, b0=0xFF, tile_base=0x2000)
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert pixels[0][1]
+
+    def test_tile_base_r6_4_ignores_0x0000(self):
+        # Data at 0x0000 should NOT be used when R6 selects 0x2000
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r6=0x04)
+        write_tile_row(vram, 0, 0, b0=0xFF, tile_base=0x0000)  # wrong base
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert not pixels[0][1]
+
+    # --- tall mode tile selection -------------------------------------------
+
+    def test_tall_upper_tile_used_for_dy_lt_8(self):
+        # Tall: dy=0 → actual_row=0 < 8 → use tile 2 (even), row 0
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x02)
+        write_tile_row(vram, 2, 0, b0=0xFF)   # upper tile has data
+        write_tile_row(vram, 3, 0, b0=0x00)   # lower tile is transparent
+        setup_sprite(vram, regs, 0, 0, 0, 2)  # tile 2 (even)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)   # dy=0
+        assert pixels[0][1]
+
+    def test_tall_lower_tile_used_for_dy_ge_8(self):
+        # Tall: dy=8 → actual_row=8 ≥ 8 → use tile 3 (2|1), row 0
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x02)
+        write_tile_row(vram, 2, 0, b0=0x00)   # upper transparent
+        write_tile_row(vram, 3, 0, b0=0xFF)   # lower has data
+        setup_sprite(vram, regs, 0, 0, 0, 2)
+        pixels, _, _ = render_sprite_line(vram, regs, 9)   # dy=8
+        assert pixels[0][1]
+
+    def test_tall_lower_tile_row_7_for_dy_15(self):
+        # dy=15 → actual_row=15 ≥ 8 → lower tile, row 15-8=7
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x02)
+        write_tile_row(vram, 3, 7, b0=0xFF)   # lower tile row 7
+        setup_sprite(vram, regs, 0, 0, 0, 2)
+        pixels, _, _ = render_sprite_line(vram, regs, 16)  # dy=15
+        assert pixels[0][1]
+
+    # --- zoom mode ---------------------------------------------------------
+
+    def test_zoom_doubles_each_pixel_in_x(self):
+        # col 0 only → screen pixels x and x+1 both set; x+2 transparent
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x01)
+        write_tile_row(vram, 0, 0, b0=0x80)   # only bit 7 (col 0) set
+        setup_sprite(vram, regs, 0, 0, 10, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert pixels[10][1]
+        assert pixels[11][1]
+        assert not pixels[12][1]
+
+    def test_zoom_dy_1_uses_same_row_as_dy_0(self):
+        # zoom: actual_row = dy>>1; dy=0 and dy=1 both map to row 0
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x01)
+        write_tile_row(vram, 0, 0, b0=0xFF)   # row 0 has data
+        write_tile_row(vram, 0, 1, b0=0x00)   # row 1 empty
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pix_dy0, _, _ = render_sprite_line(vram, regs, 1)  # dy=0
+        pix_dy1, _, _ = render_sprite_line(vram, regs, 2)  # dy=1
+        assert pix_dy0[0][1]
+        assert pix_dy1[0][1]   # same row 0, still has pixel
+
+    def test_zoom_dy_2_uses_row_1(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E, r1=0x01)
+        write_tile_row(vram, 0, 0, b0=0xFF)   # row 0 has data
+        write_tile_row(vram, 0, 1, b0=0x00)   # row 1 empty
+        setup_sprite(vram, regs, 0, 0, 0, 0)
+        pix_dy2, _, _ = render_sprite_line(vram, regs, 3)  # dy=2 → row 1
+        assert not pix_dy2[0][1]
+
+    # --- right-edge clipping -----------------------------------------------
+
+    def test_right_edge_clipping_x252(self):
+        # X=252 → cols 0-3 map to screen 252-255 (in range);
+        # cols 4-7 map to 260-263 (out of range) → clipped
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b0=0xFF)
+        setup_sprite(vram, regs, 0, 0, 252, 0)
+        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        assert all(pixels[x][1] for x in range(252, 256))
+        assert sum(p[1] for p in pixels) == 4
+
+    # --- sprite priority ---------------------------------------------------
+
+    def test_earlier_sprite_wins_at_shared_position(self):
+        # Sprite 0 (cram 17) and sprite 1 (cram 18) both at X=0;
+        # sprite 0 is drawn first and should occupy position 0
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b0=0xFF)          # tile 0 → color 1 → cram 17
+        write_tile_row(vram, 1, 0, b1=0xFF)          # tile 1 → color 2 → cram 18
+        sat_write(vram, regs, 0, 0, 0, 0)
+        sat_write(vram, regs, 1, 0, 0, 1)
+        sat_terminate(vram, regs, 2)
+        pixels, _, collision = render_sprite_line(vram, regs, 1)
+        assert pixels[0][0] == 17
+        assert collision is True
+
+    # --- collision detection -----------------------------------------------
+
+    def test_collision_two_overlapping_sprites(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b0=0xFF)
+        sat_write(vram, regs, 0, 0, 0, 0)   # X=0, covers 0-7
+        sat_write(vram, regs, 1, 0, 4, 0)   # X=4, covers 4-11 → overlap 4-7
+        sat_terminate(vram, regs, 2)
+        _, _, collision = render_sprite_line(vram, regs, 1)
+        assert collision is True
+
+    def test_no_collision_non_overlapping_sprites(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        write_tile_row(vram, 0, 0, b0=0xFF)
+        sat_write(vram, regs, 0, 0,  0, 0)  # X=0,  pixels 0-7
+        sat_write(vram, regs, 1, 0, 16, 0)  # X=16, pixels 16-23
+        sat_terminate(vram, regs, 2)
+        _, _, collision = render_sprite_line(vram, regs, 1)
+        assert collision is False
+
+    def test_no_collision_when_overlap_is_transparent(self):
+        # Two sprites at same X, but all pixels are color 0 → transparent
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        # tile 0 all zeros = transparent
+        sat_write(vram, regs, 0, 0, 0, 0)
+        sat_write(vram, regs, 1, 0, 0, 0)
+        sat_terminate(vram, regs, 2)
+        _, _, collision = render_sprite_line(vram, regs, 1)
+        assert collision is False
+
+    # --- overflow forwarded ------------------------------------------------
+
+    def test_overflow_forwarded_from_sprites_on_line(self):
+        vram = make_vram()
+        regs = make_regs(r5=0x7E)
+        for n in range(9):
+            sat_write(vram, regs, n, 0, n * 8, 0)
+        sat_terminate(vram, regs, 9)
+        _, overflow, _ = render_sprite_line(vram, regs, 1)
+        assert overflow is True
+
