@@ -421,3 +421,152 @@ class TestMemoryBus:
         bus.write(0xFFFD, 3)
         assert bus.read(0x0000) == 0xAA
         assert bus.read(0x0200) == 0xBB
+
+    # --- all four mapper registers via bus ---------------------------------
+
+    def test_fffc_via_bus_enables_cart_ram(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFC, 0x08)          # bit 3 → cart RAM enable
+        assert bus.mapper._cart_ram_enabled is True
+
+    def test_fffe_via_bus_sets_slot1(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFE, 3)             # $FFFE → slot 1 = bank 3
+        assert bus.mapper.slot_banks[1] == 3
+        assert bus.read(0x4000) == 0x03
+
+    def test_ffff_via_bus_sets_slot2(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFF, 1)             # $FFFF → slot 2 = bank 1
+        assert bus.mapper.slot_banks[2] == 1
+
+    def test_all_four_mapper_registers_written_through_bus(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFC, 0x00)          # $FFFC: cart RAM off, bank 0
+        bus.write(0xFFFD, 3)             # $FFFD: slot 0 = bank 3
+        bus.write(0xFFFE, 2)             # $FFFE: slot 1 = bank 2
+        bus.write(0xFFFF, 1)             # $FFFF: slot 2 = bank 1
+        assert bus.mapper.slot_banks == (3, 2, 1)
+
+    def test_mapper_register_not_triggered_below_fffc(self):
+        # Writes to $FFFB and below land in RAM but do not update mapper
+        bus = MemoryBus(_make_cart(64))
+        before = bus.mapper.slot_banks
+        bus.write(0xFFFB, 3)
+        assert bus.mapper.slot_banks == before
+
+    # --- cart RAM through the bus ($8000–$BFFF) ----------------------------
+
+    def test_cart_ram_write_and_read_via_bus(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFC, 0x08)          # enable cart RAM (bank 0)
+        bus.write(0x8100, 0xAB)
+        assert bus.read(0x8100) == 0xAB
+
+    def test_cart_ram_byte_masking_via_bus(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFC, 0x08)
+        bus.write(0x8000, 0x1FF)         # only low byte stored
+        assert bus.read(0x8000) == 0xFF
+
+    def test_write_to_slot2_without_cart_ram_has_no_effect_on_read(self):
+        # Cart RAM disabled → write to $8000–$BFFF is silently dropped
+        bus = MemoryBus(_make_cart(64))
+        original = bus.read(0x8000)      # ROM value (bank 2 = 0x02)
+        bus.write(0x8000, original ^ 0xFF)
+        assert bus.read(0x8000) == original
+
+    def test_cart_ram_bank1_via_bus(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFC, 0x08)          # bank 0, enabled
+        bus.write(0x8050, 0x11)
+        bus.write(0xFFFC, 0x0C)          # bank 1, enabled
+        bus.write(0x8050, 0x22)
+        # Back to bank 0 → 0x11 unchanged
+        bus.write(0xFFFC, 0x08)
+        assert bus.read(0x8050) == 0x11
+        # Back to bank 1 → 0x22
+        bus.write(0xFFFC, 0x0C)
+        assert bus.read(0x8050) == 0x22
+
+    # --- writes to ROM regions are ignored ---------------------------------
+
+    def test_write_to_slot0_ignored(self):
+        bus = MemoryBus(_make_cart(64))
+        original = bus.read(0x1000)
+        bus.write(0x1000, original ^ 0xFF)
+        assert bus.read(0x1000) == original
+
+    def test_write_to_slot1_ignored(self):
+        bus = MemoryBus(_make_cart(64))
+        original = bus.read(0x5000)
+        bus.write(0x5000, original ^ 0xFF)
+        assert bus.read(0x5000) == original
+
+    def test_write_to_slot0_boundary_7fff_ignored(self):
+        bus = MemoryBus(_make_cart(64))
+        original = bus.read(0x7FFF)
+        bus.write(0x7FFF, original ^ 0xFF)
+        assert bus.read(0x7FFF) == original
+
+    # --- RAM region boundaries and mirrors ---------------------------------
+
+    def test_ram_write_at_dfff(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xDFFF, 0x99)
+        assert bus.read(0xDFFF) == 0x99
+
+    def test_ram_mirror_write_at_e000_readable_at_c000(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xE200, 0x44)
+        assert bus.read(0xC200) == 0x44  # $E200 mirrors $C200
+
+    def test_ram_mirror_write_at_c000_readable_at_e000(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xC300, 0x66)
+        assert bus.read(0xE300) == 0x66
+
+    # --- reset -------------------------------------------------------------
+
+    def test_reset_clears_ram_content(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xC000, 0x42)
+        bus.reset()
+        assert bus.read(0xC000) == 0x00
+
+    def test_reset_restores_default_slot_mapping(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFD, 3)
+        bus.write(0xFFFE, 2)
+        bus.write(0xFFFF, 1)
+        bus.reset()
+        assert bus.mapper.slot_banks == (0, 1, 2)
+
+    def test_reset_disables_cart_ram(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFC, 0x08)          # enable cart RAM
+        bus.reset()
+        assert bus.mapper._cart_ram_enabled is False
+
+    def test_reset_rom_reads_work_after_reset(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xFFFF, 3)             # remap slot 2 to bank 3
+        bus.reset()
+        assert bus.read(0x8000) == 0x02  # back to default bank 2
+
+    # --- address and value masking -----------------------------------------
+
+    def test_16bit_address_masking_on_read(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xC000, 0x77)
+        assert bus.read(0x1C000) == 0x77   # 0x1C000 & 0xFFFF == 0xC000
+
+    def test_16bit_address_masking_on_write(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0x1C010, 0x88)            # 0x1C010 & 0xFFFF == 0xC010
+        assert bus.read(0xC010) == 0x88
+
+    def test_byte_value_masking_on_write(self):
+        bus = MemoryBus(_make_cart(64))
+        bus.write(0xC000, 0x1AB)            # only low byte stored
+        assert bus.read(0xC000) == 0xAB
