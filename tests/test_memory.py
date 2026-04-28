@@ -269,6 +269,112 @@ class TestSegaMapper:
         mapper.reset()
         assert mapper.slot_banks == (0, 1, 2)
 
+    # --- $FFFC control register --------------------------------------------
+
+    def test_fffc_bit3_enables_cart_ram(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)   # bit 3 set
+        assert mapper._cart_ram_enabled is True
+
+    def test_fffc_bit3_clear_disables_cart_ram(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)
+        mapper.write_register(0, 0x00)   # clear bit 3
+        assert mapper._cart_ram_enabled is False
+
+    def test_fffc_bit2_clear_selects_cart_ram_bank_0(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)   # enable, bank bit = 0
+        assert mapper._cart_ram_bank == 0
+
+    def test_fffc_bit2_set_selects_cart_ram_bank_1(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x0C)   # bits 3 + 2 set
+        assert mapper._cart_ram_bank == 1
+
+    # --- cart RAM write / read when enabled --------------------------------
+
+    def test_write_slot2_stores_in_cart_ram_when_enabled(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)   # enable cart RAM
+        mapper.write_slot2(0x8010, 0xAB)
+        assert mapper.read_slot2(0x8010) == 0xAB
+
+    def test_write_slot2_ignored_when_disabled(self):
+        mapper = SegaMapper(_make_cart(64))
+        # cart RAM disabled (default)
+        mapper.write_slot2(0x8010, 0xAB)
+        mapper.write_register(0, 0x08)   # now enable to peek inside
+        assert mapper.read_slot2(0x8010) == 0x00   # nothing was written
+
+    def test_read_slot2_returns_rom_when_disabled(self):
+        mapper = SegaMapper(_make_cart(64))
+        # slot 2 default = bank 2, which is filled with 0x02
+        assert mapper.read_slot2(0x8000) == 0x02
+
+    def test_read_slot2_returns_cart_ram_when_enabled(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)
+        mapper.write_slot2(0x8005, 0x77)
+        # now enable is set; reading back should give 0x77, not ROM
+        assert mapper.read_slot2(0x8005) == 0x77
+
+    def test_write_slot2_masks_to_byte(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)
+        mapper.write_slot2(0x8000, 0x1FF)   # only low byte stored
+        assert mapper.read_slot2(0x8000) == 0xFF
+
+    # --- cart RAM bank independence ----------------------------------------
+
+    def test_cart_ram_bank0_and_bank1_are_independent(self):
+        mapper = SegaMapper(_make_cart(64))
+        # Write 0xAA to bank 0, offset 0x0010
+        mapper.write_register(0, 0x08)   # bank 0, enabled
+        mapper.write_slot2(0x8010, 0xAA)
+        # Switch to bank 1 and write 0xBB at same offset
+        mapper.write_register(0, 0x0C)   # bank 1, enabled
+        mapper.write_slot2(0x8010, 0xBB)
+        assert mapper.read_slot2(0x8010) == 0xBB
+        # Switch back to bank 0 — should still be 0xAA
+        mapper.write_register(0, 0x08)
+        assert mapper.read_slot2(0x8010) == 0xAA
+
+    def test_cart_ram_bank1_offset_is_0x4000_into_array(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x0C)   # bank 1, enabled
+        mapper.write_slot2(0x8000, 0x55)
+        # Verify it landed at position 0x4000 in the raw array
+        assert mapper._cart_ram[0x4000] == 0x55
+
+    def test_cart_ram_bank0_offset_is_0x0000_into_array(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)   # bank 0, enabled
+        mapper.write_slot2(0x8001, 0x33)
+        assert mapper._cart_ram[0x0001] == 0x33
+
+    # --- reset clears cart RAM state ---------------------------------------
+
+    def test_reset_disables_cart_ram(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)
+        mapper.reset()
+        assert mapper._cart_ram_enabled is False
+
+    def test_reset_clears_cart_ram_bank_to_0(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x0C)   # bank 1
+        mapper.reset()
+        assert mapper._cart_ram_bank == 0
+
+    def test_reset_restores_slot_banks_alongside_cart_ram(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(1, 3)
+        mapper.write_register(0, 0x08)
+        mapper.reset()
+        assert mapper.slot_banks == (0, 1, 2)
+        assert mapper._cart_ram_enabled is False
+
 
 # ---------------------------------------------------------------------------
 # TestMemoryBus
