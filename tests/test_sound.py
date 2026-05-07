@@ -91,7 +91,7 @@ class TestAttenuation:
 
 class TestPSGDefaults:
     def test_tone_periods_zero(self):
-        assert PSG().  _tone_period == [0, 0, 0]
+        assert PSG()._tone_period == [0, 0, 0]
 
     def test_all_volumes_silent(self):
         assert PSG()._volume == [15, 15, 15, 15]

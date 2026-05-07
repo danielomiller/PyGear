@@ -21,7 +21,6 @@ Write map
 all others  ignored
 """
 
-_READ_FF   = frozenset({0xC1, 0xDD})
 _JOYPAD_C0 = frozenset({0xC0, 0xDC})
 _VDP_READ  = frozenset({0x7E, 0x7F, 0xBE, 0xBF})
 _VDP_WRITE = frozenset({0xBE, 0xBF})
@@ -41,8 +40,6 @@ class IOPorts:
             return self._vdp.port_read(port)
         if port in _JOYPAD_C0:
             return self._joypad.port_c0()
-        if port in _READ_FF:
-            return 0xFF
         return 0xFF
 
     def write(self, port: int, value: int) -> None:

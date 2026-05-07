@@ -15,9 +15,8 @@ import pygame
 from pygear.cartridge import Cartridge
 from pygear.console import GameGearConsole
 from pygear.io.joypad import UP, DOWN, LEFT, RIGHT, BUTTON1, BUTTON2, START
+from pygear.vdp.vdp import SCREEN_W, SCREEN_H
 
-SCREEN_W = 160
-SCREEN_H = 144
 DEFAULT_SCALE = 3
 
 KEY_MAP = {

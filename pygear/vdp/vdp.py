@@ -88,9 +88,9 @@ class VDP:
 
     # ------------------------------------------------------------------
     def reset(self) -> None:
-        for i in range(VRAM_SIZE): self.vram[i] = 0
-        for i in range(CRAM_SIZE): self.cram[i] = 0
-        for i in range(NUM_REGS):  self.regs[i] = 0
+        self.vram[:] = bytes(VRAM_SIZE)
+        self.cram[:] = bytes(CRAM_SIZE)
+        self.regs[:] = bytes(NUM_REGS)
         self.status       = 0
         self._addr        = 0
         self._code        = 0
