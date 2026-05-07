@@ -542,7 +542,7 @@ class TestMemoryBus:
         bus.reset()
         assert bus.mapper.slot_banks == (0, 1, 2)
 
-    def test_reset_disables_cart_ram(self):
+    def test_bus_reset_disables_cart_ram(self):
         bus = MemoryBus(_make_cart(64))
         bus.write(0xFFFC, 0x08)          # enable cart RAM
         bus.reset()

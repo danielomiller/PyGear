@@ -47,6 +47,9 @@ def main() -> None:
                         help="display scale factor (default: 3)")
     args = parser.parse_args()
 
+    if args.scale < 1:
+        parser.error("--scale must be at least 1")
+
     pygame.mixer.pre_init(44100, -16, 1, 512)
     pygame.init()
 
@@ -91,7 +94,7 @@ def main() -> None:
             pygame.display.flip()
 
         # --- Audio ---
-        arr   = (np.array(audio) * 32767).astype(np.int16)
+        arr   = np.clip(np.array(audio) * 32767, -32767, 32767).astype(np.int16)
         sound = pygame.sndarray.make_sound(arr.reshape(-1, 1))
         if not audio_ch.get_busy():
             audio_ch.play(sound)
