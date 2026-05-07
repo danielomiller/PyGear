@@ -1,4 +1,4 @@
-"""Sega Game Gear VDP — core: VRAM, CRAM, register file, and port I/O.
+"""Sega Game Gear VDP — core: VRAM, CRAM, register file, port I/O, and compositing.
 
 Port map
 --------
@@ -32,6 +32,8 @@ Timing
 228 T-states per scanline, 262 scanlines per frame (NTSC).
 Active display: lines 0–191.  VBlank: lines 192–261.
 """
+
+from .sprites import render_sprite_line
 
 VRAM_SIZE = 0x4000   # 16 KB
 CRAM_SIZE = 64       # 32 colours × 2 bytes
@@ -279,6 +281,26 @@ class VDP:
         return result
 
     # ------------------------------------------------------------------
+    # Sprite + background compositing
+    # ------------------------------------------------------------------
+    def _compose_line(self, bg: list, sprite_pixels: list) -> list:
+        """Merge background and sprite layers into a 256-element cram_index list.
+
+        Compositing rule per pixel:
+          Sprite wins when it has a non-transparent pixel AND the background
+          tile either has no priority flag OR its own color index % 16 == 0
+          (i.e. the background pixel is itself transparent / palette color 0).
+          Otherwise the background pixel is used.
+        """
+        composed = []
+        for (bg_cram, bg_priority), (sp_cram, sp_has_pixel) in zip(bg, sprite_pixels):
+            if sp_has_pixel and (not bg_priority or bg_cram % 16 == 0):
+                composed.append(sp_cram)
+            else:
+                composed.append(bg_cram)
+        return composed
+
+    # ------------------------------------------------------------------
     # CRAM colour decode
     # ------------------------------------------------------------------
     def cram_color(self, index: int) -> tuple:
@@ -320,8 +342,12 @@ class VDP:
         line = self._line
 
         if line < ACTIVE_LINES:
-            # Render scanline into buffer
-            self._line_buffer[line] = self.render_line(line)
+            # Render and composite background + sprite layers
+            bg                       = self.render_line(line)
+            sp_pixels, ov, collision = render_sprite_line(self.vram, self.regs, line)
+            self._line_buffer[line]  = self._compose_line(bg, sp_pixels)
+            if ov:        self.status |= 0x40   # sprite overflow
+            if collision: self.status |= 0x20   # sprite collision
             # Line interrupt counter (R0 bit 4 enables, R10 is reload value)
             if self._line_irq == 0:
                 self._line_irq = self.regs[10]
@@ -349,8 +375,7 @@ class VDP:
             src_row = self._line_buffer[row + CROP_Y]
             frame_row = []
             for col in range(SCREEN_W):
-                cram_idx, _ = src_row[col + CROP_X]
-                frame_row.append(self.cram_color(cram_idx))
+                frame_row.append(self.cram_color(src_row[col + CROP_X]))
             frame.append(frame_row)
         self.frame       = frame
         self.frame_ready = True
