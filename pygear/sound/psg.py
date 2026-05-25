@@ -154,35 +154,47 @@ class PSG:
         ticks_per_sample = TICK_RATE / sample_rate
         white_noise = bool(self._noise_ctrl & 0x04)
         nf          = self._noise_ctrl & 0x03
-        out = []
 
+        # Cache attribute references — avoids repeated dict lookup in hot loop
+        tc   = self._tone_counter
+        tp   = self._tone_period
+        tf   = self._tone_flip
+        vol  = self._volume
+        atten = ATTENUATION
+        noise_periods = self._NOISE_PERIODS
+        noise_counter = self._noise_counter
+        lfsr          = self._lfsr
+        noise_period  = (tp[2] or 1) if nf == 3 else noise_periods[nf]
+
+        out = []
         for _ in range(n_samples):
             # --- Tone channels ---
             for ch in range(3):
-                self._tone_counter[ch] -= ticks_per_sample
-                period = self._tone_period[ch] or 1
-                while self._tone_counter[ch] <= 0:
-                    self._tone_counter[ch] += period
-                    self._tone_flip[ch] = not self._tone_flip[ch]
+                tc[ch] -= ticks_per_sample
+                period = tp[ch] or 1
+                while tc[ch] <= 0:
+                    tc[ch] += period
+                    tf[ch] = not tf[ch]
 
             # --- Noise channel ---
-            noise_period = (self._tone_period[2] or 1) if nf == 3 else self._NOISE_PERIODS[nf]
-            self._noise_counter -= ticks_per_sample
-            while self._noise_counter <= 0:
-                self._noise_counter += noise_period
-                out_bit  = self._lfsr & 1
-                feedback = (out_bit ^ ((self._lfsr >> 3) & 1)) if white_noise else out_bit
-                self._lfsr = (self._lfsr >> 1) | (feedback << 15)
+            noise_counter -= ticks_per_sample
+            while noise_counter <= 0:
+                noise_counter += noise_period
+                out_bit  = lfsr & 1
+                feedback = (out_bit ^ ((lfsr >> 3) & 1)) if white_noise else out_bit
+                lfsr = (lfsr >> 1) | (feedback << 15)
 
             # --- Mix ---
             mix = 0.0
             for ch in range(3):
-                amp = ATTENUATION[self._volume[ch]]
-                mix += amp if self._tone_flip[ch] else -amp
+                amp = atten[vol[ch]]
+                mix += amp if tf[ch] else -amp
 
-            noise_amp = ATTENUATION[self._volume[3]]
-            mix += noise_amp if (self._lfsr & 1) else -noise_amp
+            noise_amp = atten[vol[3]]
+            mix += noise_amp if (lfsr & 1) else -noise_amp
 
             out.append(mix / 4.0)
 
+        self._noise_counter = noise_counter
+        self._lfsr          = lfsr
         return out
