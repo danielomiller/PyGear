@@ -95,7 +95,9 @@ def main() -> None:
         # --- Audio ---
         arr   = np.clip(np.array(audio) * 32767, -32767, 32767).astype(np.int16)
         sound = pygame.sndarray.make_sound(arr.reshape(-1))
-        if not audio_ch.get_busy():
+        if audio_ch.get_busy():
+            audio_ch.queue(sound)   # double-buffer: replace queued frame, never drop
+        else:
             audio_ch.play(sound)
 
         clock.tick(60)

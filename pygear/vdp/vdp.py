@@ -214,7 +214,7 @@ class VDP:
         Scroll locks (R0)
         -----------------
         bit 6  H-scroll lock: top 16 lines (line < 16) ignore R8
-        bit 7  V-scroll lock: right 8 columns (screen_x >= 192) ignore R9
+        bit 7  V-scroll lock: right 8 columns (screen_x >= 248) ignore R9
         """
         r0        = self.regs[0]
         h_scroll  = self.regs[8]
@@ -240,7 +240,7 @@ class VDP:
         result = []
 
         for screen_x in range(256):
-            if vscroll_lock and screen_x >= 192:
+            if vscroll_lock and screen_x >= 248:
                 tr = tile_row_l
                 pr = prow_l
             else:

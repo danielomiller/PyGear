@@ -939,19 +939,19 @@ class TestBackground:
         assert vdp.render_line(15)[0][0] == 6     # locked: shows bg col 0
 
     def test_vscroll_lock_right_columns_ignore_vscroll(self):
-        # R0 bit 7 set, V-scroll=8; screen x>=192 shows line 0 → bg_y=0 → tile row 0
+        # R0 bit 7 set, V-scroll=8; screen x>=248 shows line 0 → bg_y=0 → tile row 0
         # Without lock line 0 + V-scroll 8 → bg_y=8 → tile row 1
         vdp = make_bg_vdp()
         write_solid_tile(vdp, 1, color=4)
-        write_name_entry(vdp, 0, 24, tile_num=1)  # bg tile row 0, col 24 (screen x 192)
+        write_name_entry(vdp, 0, 31, tile_num=1)  # bg tile row 0, col 31 (screen x 248)
         vdp.regs[9] = 8
         vdp.regs[0] = 0x80    # V-scroll lock
         line = vdp.render_line(0)
-        # screen x=192 → bg_x=192 (no H-scroll) → tile col 24, row 0 (locked) → tile 1
-        assert line[192][0] == 4
+        # screen x=248 → bg_x=248 (no H-scroll) → tile col 31, row 0 (locked) → tile 1
+        assert line[248][0] == 4
 
     def test_vscroll_lock_does_not_affect_left_columns(self):
-        # Left columns (x < 192) still use V-scroll
+        # Left columns (x < 248) still use V-scroll
         vdp = make_bg_vdp()
         write_solid_tile(vdp, 1, color=4)
         write_name_entry(vdp, 1, 0, tile_num=1)   # bg tile row 1 (V-scrolled into view)

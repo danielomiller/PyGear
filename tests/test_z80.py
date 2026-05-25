@@ -3127,8 +3127,8 @@ class TestBlock:
         for i in range(count):
             cpu.bus.mem[src + i] = 0x10 + i
         cpu.HL = src; cpu.DE = dst; cpu.BC = count
-        load_prog(cpu, [0xED, 0xB0])    # LDIR
-        cycles = cpu.step()
+        load_prog(cpu, [0xED, 0xB0])    # LDIR — one iteration per step()
+        cycles = sum(cpu.step() for _ in range(count))
         for i in range(count):
             assert cpu.bus.mem[dst + i] == 0x10 + i
         assert cpu.BC == 0x0000
@@ -3172,8 +3172,9 @@ class TestBlock:
         for i in range(count):
             cpu.bus.mem[0xC000 + i] = 0x20 + i
         cpu.HL = src; cpu.DE = dst; cpu.BC = count
-        load_prog(cpu, [0xED, 0xB8])    # LDDR
-        cpu.step()
+        load_prog(cpu, [0xED, 0xB8])    # LDDR — one iteration per step()
+        for _ in range(count):
+            cpu.step()
         for i in range(count):
             assert cpu.bus.mem[0xD000 + i] == 0x20 + i
         assert cpu.BC == 0x0000
@@ -3205,7 +3206,7 @@ class TestBlock:
         assert flag(cpu, 'PV')          # BC still non-zero
 
     def test_cpir_finds_match(self):
-        # CPIR: scan until A found or BC=0
+        # CPIR: scan until A found or BC=0; one iteration per step()
         cpu = make_cpu()
         cpu.A = 0x55
         cpu.HL = 0xC000; cpu.BC = 0x0004
@@ -3214,7 +3215,7 @@ class TestBlock:
         cpu.bus.mem[0xC002] = 0x55     # match at index 2
         cpu.bus.mem[0xC003] = 0x44
         load_prog(cpu, [0xED, 0xB1])   # CPIR
-        cycles = cpu.step()
+        cycles = sum(cpu.step() for _ in range(3))   # 2 non-match + 1 match
         assert flag(cpu, 'Z')          # match found
         assert cpu.HL == 0xC003        # points past the matching byte
         assert cpu.BC == 0x0001
@@ -3227,8 +3228,9 @@ class TestBlock:
         cpu.bus.mem[0xC000] = 0x00
         cpu.bus.mem[0xC001] = 0x00
         cpu.bus.mem[0xC002] = 0x00
-        load_prog(cpu, [0xED, 0xB1])
-        cpu.step()
+        load_prog(cpu, [0xED, 0xB1])   # CPIR — one iteration per step()
+        for _ in range(3):
+            cpu.step()
         assert not flag(cpu, 'Z')
         assert not flag(cpu, 'PV')     # BC reached 0
 
@@ -3237,14 +3239,14 @@ class TestBlock:
     # -----------------------------------------------------------------------
 
     def test_inir(self):
-        # Read B bytes from port C into memory at HL
+        # Read B bytes from port C into memory at HL; one iteration per step()
         cpu = make_cpu()
         cpu.B = 3; cpu.C = 0x10; cpu.HL = 0xC000
         cpu.ports.set_port(0x10, 0xAA)
         cpu.ports.set_port(0x10, 0xBB)
         cpu.ports.set_port(0x10, 0xCC)
         load_prog(cpu, [0xED, 0xB2])   # INIR
-        cycles = cpu.step()
+        cycles = sum(cpu.step() for _ in range(3))
         assert cpu.bus.mem[0xC000] == 0xAA
         assert cpu.bus.mem[0xC001] == 0xBB
         assert cpu.bus.mem[0xC002] == 0xCC
@@ -3254,39 +3256,41 @@ class TestBlock:
         assert cycles == 21 * 2 + 16
 
     def test_otir(self):
-        # Output B bytes from (HL) to port C
+        # Output B bytes from (HL) to port C; one iteration per step()
         cpu = make_cpu()
         cpu.B = 3; cpu.C = 0x20; cpu.HL = 0xC010
         cpu.bus.mem[0xC010] = 0x11
         cpu.bus.mem[0xC011] = 0x22
         cpu.bus.mem[0xC012] = 0x33
         load_prog(cpu, [0xED, 0xB3])   # OTIR
-        cycles = cpu.step()
+        cycles = sum(cpu.step() for _ in range(3))
         assert cpu.ports.writes == [(0x20, 0x11), (0x20, 0x22), (0x20, 0x33)]
         assert cpu.B == 0
         assert cpu.HL == 0xC013
         assert cycles == 21 * 2 + 16
 
     def test_otdr(self):
-        # OTDR: output backwards
+        # OTDR: output backwards; one iteration per step()
         cpu = make_cpu()
         cpu.B = 2; cpu.C = 0x30; cpu.HL = 0xC021
         cpu.bus.mem[0xC021] = 0xAA
         cpu.bus.mem[0xC020] = 0xBB
         load_prog(cpu, [0xED, 0xBB])   # OTDR
-        cpu.step()
+        for _ in range(2):
+            cpu.step()
         assert cpu.ports.writes == [(0x30, 0xAA), (0x30, 0xBB)]
         assert cpu.B == 0
         assert cpu.HL == 0xC01F
 
     def test_indr(self):
-        # INDR: read backwards
+        # INDR: read backwards; one iteration per step()
         cpu = make_cpu()
         cpu.B = 2; cpu.C = 0x40; cpu.HL = 0xC030
         cpu.ports.set_port(0x40, 0x12)
         cpu.ports.set_port(0x40, 0x34)
         load_prog(cpu, [0xED, 0xBA])   # INDR
-        cpu.step()
+        for _ in range(2):
+            cpu.step()
         assert cpu.bus.mem[0xC030] == 0x12
         assert cpu.bus.mem[0xC02F] == 0x34
         assert cpu.B == 0

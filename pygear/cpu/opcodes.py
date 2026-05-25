@@ -1263,21 +1263,15 @@ def build_all_tables(cpu):
         _ldi_flags(_ldd_step()); return 16
     ed[0xA0] = op_A0; ed[0xA8] = op_A8
 
-    def op_B0():  # LDIR
-        cycles = 0
-        while True:
-            val = _ldi_step()
-            if cpu.BC == 0: _ldi_flags(val); cycles += 16; break
-            cycles += 21
-        return cycles
+    def op_B0():  # LDIR — one iteration per step(); re-execute if BC != 0
+        val = _ldi_step(); _ldi_flags(val)
+        if cpu.BC != 0: cpu.PC = (cpu.PC - 2) & 0xFFFF; return 21
+        return 16
 
-    def op_B8():  # LDDR
-        cycles = 0
-        while True:
-            val = _ldd_step()
-            if cpu.BC == 0: _ldi_flags(val); cycles += 16; break
-            cycles += 21
-        return cycles
+    def op_B8():  # LDDR — one iteration per step(); re-execute if BC != 0
+        val = _ldd_step(); _ldi_flags(val)
+        if cpu.BC != 0: cpu.PC = (cpu.PC - 2) & 0xFFFF; return 21
+        return 16
 
     ed[0xB0] = op_B0; ed[0xB8] = op_B8
 
@@ -1304,23 +1298,15 @@ def build_all_tables(cpu):
         val = bus.read(cpu.HL); _cpi_flags(val, False); return 16
     ed[0xA1] = op_A1; ed[0xA9] = op_A9
 
-    def op_B1():  # CPIR
-        cycles = 0
-        while True:
-            val = bus.read(cpu.HL); _cpi_flags(val, True)
-            if cpu.BC == 0 or (cpu.F & Z_FLAG):
-                cycles += 16; break
-            cycles += 21
-        return cycles
+    def op_B1():  # CPIR — one iteration per step(); re-execute if BC != 0 and not found
+        val = bus.read(cpu.HL); _cpi_flags(val, True)
+        if cpu.BC == 0 or (cpu.F & Z_FLAG): return 16
+        cpu.PC = (cpu.PC - 2) & 0xFFFF; return 21
 
-    def op_B9():  # CPDR
-        cycles = 0
-        while True:
-            val = bus.read(cpu.HL); _cpi_flags(val, False)
-            if cpu.BC == 0 or (cpu.F & Z_FLAG):
-                cycles += 16; break
-            cycles += 21
-        return cycles
+    def op_B9():  # CPDR — one iteration per step(); re-execute if BC != 0 and not found
+        val = bus.read(cpu.HL); _cpi_flags(val, False)
+        if cpu.BC == 0 or (cpu.F & Z_FLAG): return 16
+        cpu.PC = (cpu.PC - 2) & 0xFFFF; return 21
 
     ed[0xB1] = op_B1; ed[0xB9] = op_B9
 
@@ -1339,21 +1325,15 @@ def build_all_tables(cpu):
     def op_AA(): _ini_step(False); return 16   # IND
     ed[0xA2] = op_A2; ed[0xAA] = op_AA
 
-    def op_B2():  # INIR
-        cycles = 0
-        while True:
-            _ini_step(True)
-            if cpu.B == 0: cycles += 16; break
-            cycles += 21
-        return cycles
+    def op_B2():  # INIR — one iteration per step(); re-execute if B != 0
+        _ini_step(True)
+        if cpu.B == 0: return 16
+        cpu.PC = (cpu.PC - 2) & 0xFFFF; return 21
 
-    def op_BA():  # INDR
-        cycles = 0
-        while True:
-            _ini_step(False)
-            if cpu.B == 0: cycles += 16; break
-            cycles += 21
-        return cycles
+    def op_BA():  # INDR — one iteration per step(); re-execute if B != 0
+        _ini_step(False)
+        if cpu.B == 0: return 16
+        cpu.PC = (cpu.PC - 2) & 0xFFFF; return 21
 
     ed[0xB2] = op_B2; ed[0xBA] = op_BA
 
@@ -1372,21 +1352,15 @@ def build_all_tables(cpu):
     def op_AB(): _outi_step(False); return 16   # OUTD
     ed[0xA3] = op_A3; ed[0xAB] = op_AB
 
-    def op_B3():  # OTIR
-        cycles = 0
-        while True:
-            _outi_step(True)
-            if cpu.B == 0: cycles += 16; break
-            cycles += 21
-        return cycles
+    def op_B3():  # OTIR — one iteration per step(); re-execute if B != 0
+        _outi_step(True)
+        if cpu.B == 0: return 16
+        cpu.PC = (cpu.PC - 2) & 0xFFFF; return 21
 
-    def op_BB():  # OTDR
-        cycles = 0
-        while True:
-            _outi_step(False)
-            if cpu.B == 0: cycles += 16; break
-            cycles += 21
-        return cycles
+    def op_BB():  # OTDR — one iteration per step(); re-execute if B != 0
+        _outi_step(False)
+        if cpu.B == 0: return 16
+        cpu.PC = (cpu.PC - 2) & 0xFFFF; return 21
 
     ed[0xB3] = op_B3; ed[0xBB] = op_BB
 
