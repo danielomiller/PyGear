@@ -94,7 +94,7 @@ def main() -> None:
 
         # --- Audio ---
         arr   = np.clip(np.array(audio) * 32767, -32767, 32767).astype(np.int16)
-        sound = pygame.sndarray.make_sound(arr.reshape(-1, 1))
+        sound = pygame.sndarray.make_sound(arr.reshape(-1))
         if not audio_ch.get_busy():
             audio_ch.play(sound)
 
