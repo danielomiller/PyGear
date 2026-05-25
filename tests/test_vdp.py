@@ -1345,10 +1345,12 @@ class TestVDPTiming:
         assert cpu.interrupt_count == count_after_active
 
     def test_line_irq_counter_reloaded_during_vblank(self):
+        # Counter reloads on the last VBlank line (TOTAL_LINES-1) so it is
+        # fresh at the start of the next frame's active display.
         vdp = make_timing_vdp()
         vdp.regs[10]  = 7
         vdp._line_irq = 0
-        step_lines(vdp, ACTIVE_LINES + 1)   # one VBlank line processed
+        step_lines(vdp, TOTAL_LINES)   # full frame — reload happens on line 261
         assert vdp._line_irq == 7
 
     def test_line_irq_without_cpu_does_not_raise(self):

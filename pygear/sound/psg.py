@@ -44,8 +44,15 @@ prevent an infinite reload loop.
 
 Output frequency = TICK_RATE / (2 × period) Hz.
 
-render() returns floats in [-1.0, +1.0].  Each channel contributes ±amp
-where amp = ATTENUATION[volume]; the four-channel sum is divided by 4.0.
+render() returns a list of (left, right) float pairs in [-1.0, +1.0].
+Each channel contributes ±amp where amp = ATTENUATION[volume]; the
+four-channel sum per side is divided by 4.0.  The stereo register
+(Game Gear port 0x06) controls which channels reach each side:
+  Bit 7: Tone 3 right  Bit 3: Tone 3 left
+  Bit 6: Tone 2 right  Bit 2: Tone 2 left
+  Bit 5: Tone 1 right  Bit 1: Tone 1 left
+  Bit 4: Noise right   Bit 0: Noise left
+Default 0xFF enables all channels on both sides (full stereo).
 
 Noise synthesis
 ---------------
@@ -86,6 +93,7 @@ class PSG:
         self._volume       = [15, 15, 15, 15] # 4-bit attenuation (default silent)
         self._noise_ctrl   = 0                # 4-bit noise control
         self._latch_reg    = 0                # last latched register index 0-7
+        self._stereo       = 0xFF             # GG port 0x06: all channels both sides
 
         # Synthesis state
         self._tone_counter  = [0.0, 0.0, 0.0]
@@ -99,10 +107,23 @@ class PSG:
         self._volume        = [15, 15, 15, 15]
         self._noise_ctrl    = 0
         self._latch_reg     = 0
+        self._stereo        = 0xFF
         self._tone_counter  = [0.0, 0.0, 0.0]
         self._tone_flip     = [False, False, False]
         self._lfsr          = 0x8000
         self._noise_counter = 0.0
+
+    # ------------------------------------------------------------------
+    def set_stereo(self, value: int) -> None:
+        """Write the Game Gear stereo control register (port 0x06).
+
+        Bit layout:
+          Bit 7: Tone 3 right  Bit 3: Tone 3 left
+          Bit 6: Tone 2 right  Bit 2: Tone 2 left
+          Bit 5: Tone 1 right  Bit 1: Tone 1 left
+          Bit 4: Noise right   Bit 0: Noise left
+        """
+        self._stereo = value & 0xFF
 
     # ------------------------------------------------------------------
     def write(self, value: int) -> None:
@@ -148,12 +169,29 @@ class PSG:
     def render(self, n_samples: int, sample_rate: float) -> list:
         """Synthesise *n_samples* audio samples at *sample_rate* Hz.
 
-        Returns a list of floats in [-1.0, +1.0].  All four channels
-        (three tone + one noise) are mixed and divided by 4.0.
+        Returns a list of (left, right) float pairs in [-1.0, +1.0].
+        All four channels (three tone + one noise) are mixed per side and
+        divided by 4.0.  The stereo register controls channel routing.
+
+        Stereo bit layout (self._stereo):
+          Bits 7-4: right enable for channels Tone3, Tone2, Tone1, Noise
+          Bits 3-0: left  enable for channels Tone3, Tone2, Tone1, Noise
+        Channel order matches the bit layout: ch0=Tone1, ch1=Tone2, ch2=Tone3,
+        ch3=Noise.  Left bit indices: Noise=0, Tone1=1, Tone2=2, Tone3=3.
+        Right bit indices: Noise=4, Tone1=5, Tone2=6, Tone3=7.
         """
         ticks_per_sample = TICK_RATE / sample_rate
         white_noise = bool(self._noise_ctrl & 0x04)
         nf          = self._noise_ctrl & 0x03
+        stereo      = self._stereo
+
+        # Precompute per-channel left/right enable masks
+        # Tone ch0=Tone1 (bit1 left, bit5 right), ch1=Tone2 (bit2, bit6),
+        # ch2=Tone3 (bit3, bit7); Noise ch3 (bit0, bit4)
+        left_en  = [bool(stereo & (1 << (ch + 1))) for ch in range(3)]
+        right_en = [bool(stereo & (1 << (ch + 5))) for ch in range(3)]
+        noise_left_en  = bool(stereo & 0x01)
+        noise_right_en = bool(stereo & 0x10)
 
         # Cache attribute references — avoids repeated dict lookup in hot loop
         tc   = self._tone_counter
@@ -184,16 +222,25 @@ class PSG:
                 feedback = (out_bit ^ ((lfsr >> 3) & 1)) if white_noise else out_bit
                 lfsr = (lfsr >> 1) | (feedback << 15)
 
-            # --- Mix ---
-            mix = 0.0
+            # --- Mix left and right independently ---
+            mix_l = 0.0
+            mix_r = 0.0
             for ch in range(3):
                 amp = atten[vol[ch]]
-                mix += amp if tf[ch] else -amp
+                sig = amp if tf[ch] else -amp
+                if left_en[ch]:
+                    mix_l += sig
+                if right_en[ch]:
+                    mix_r += sig
 
             noise_amp = atten[vol[3]]
-            mix += noise_amp if (lfsr & 1) else -noise_amp
+            noise_sig = noise_amp if (lfsr & 1) else -noise_amp
+            if noise_left_en:
+                mix_l += noise_sig
+            if noise_right_en:
+                mix_r += noise_sig
 
-            out.append(mix / 4.0)
+            out.append((mix_l / 4.0, mix_r / 4.0))
 
         self._noise_counter = noise_counter
         self._lfsr          = lfsr

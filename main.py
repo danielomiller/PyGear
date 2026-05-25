@@ -49,7 +49,7 @@ def main() -> None:
     if args.scale < 1:
         parser.error("--scale must be at least 1")
 
-    pygame.mixer.pre_init(44100, -16, 1, 512)
+    pygame.mixer.pre_init(44100, -16, 2, 512)
     pygame.init()
 
     scale  = args.scale
@@ -93,8 +93,9 @@ def main() -> None:
             pygame.display.flip()
 
         # --- Audio ---
+        # audio is a list of (left, right) float pairs; shape (n_samples, 2)
         arr   = np.clip(np.array(audio) * 32767, -32767, 32767).astype(np.int16)
-        sound = pygame.sndarray.make_sound(arr.reshape(-1))
+        sound = pygame.sndarray.make_sound(arr)
         if audio_ch.get_busy():
             audio_ch.queue(sound)   # double-buffer: replace queued frame, never drop
         else:

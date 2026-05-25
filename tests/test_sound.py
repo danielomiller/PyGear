@@ -50,7 +50,9 @@ def _set_volume(psg: PSG, ch: int, vol: int) -> None:
 
 
 def _count_zero_crossings(samples: list) -> int:
-    return sum(1 for i in range(1, len(samples)) if samples[i] != samples[i - 1])
+    # samples is a list of (left, right) pairs; use the left channel
+    left = [s[0] for s in samples]
+    return sum(1 for i in range(1, len(left)) if left[i] != left[i - 1])
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +147,15 @@ class TestPSGDefaults:
         assert p._tone_counter == [0.0, 0.0, 0.0]
         assert p._tone_flip    == [False, False, False]
         assert p._noise_counter == 0.0
+
+    def test_stereo_default_all_channels(self):
+        assert PSG()._stereo == 0xFF
+
+    def test_reset_restores_stereo(self):
+        p = PSG()
+        p.set_stereo(0x00)
+        p.reset()
+        assert p._stereo == 0xFF
 
 
 # ---------------------------------------------------------------------------
@@ -267,32 +278,42 @@ class TestPSGWrite:
 class TestToneSynthesis:
     def test_all_silent_yields_zeros(self):
         p = PSG()
-        assert all(s == 0.0 for s in p.render(256, 44100))
+        # render() returns (left, right) pairs; all channels silent → both sides 0.0
+        assert all(l == 0.0 and r == 0.0 for l, r in p.render(256, 44100))
 
     def test_returns_correct_length(self):
         p = PSG()
         assert len(p.render(100, 44100)) == 100
 
+    def test_returns_stereo_pairs(self):
+        p = PSG()
+        samples = p.render(4, 44100)
+        assert all(isinstance(s, tuple) and len(s) == 2 for s in samples)
+
     def test_active_channel_nonzero(self):
         p = PSG()
         _set_tone(p, 0, 0x100)
         _set_volume(p, 0, 0)
-        assert any(s != 0.0 for s in p.render(512, 44100))
+        # With default stereo=0xFF, both sides should have signal
+        assert any(l != 0.0 or r != 0.0 for l, r in p.render(512, 44100))
 
     def test_square_wave_amplitude_single_channel(self):
         p = PSG()
         _set_tone(p, 0, 0x100)
         _set_volume(p, 0, 0)           # ATTENUATION[0] = 1.0; expect ±0.25
-        for s in p.render(2048, 44100):
-            assert abs(abs(s) - 0.25) < 1e-9
+        # With default stereo=0xFF both sides equal; check left channel
+        for l, r in p.render(2048, 44100):
+            assert abs(abs(l) - 0.25) < 1e-9
+            assert abs(abs(r) - 0.25) < 1e-9
 
     def test_attenuation_applied(self):
         p = PSG()
         _set_tone(p, 0, 0x100)
         _set_volume(p, 0, 2)           # ATTENUATION[2] = 10^(-4/20)
         expected_amp = ATTENUATION[2] / 4.0
-        for s in p.render(512, 44100):
-            assert abs(abs(s) - expected_amp) < 1e-9
+        for l, r in p.render(512, 44100):
+            assert abs(abs(l) - expected_amp) < 1e-9
+            assert abs(abs(r) - expected_amp) < 1e-9
 
     def test_frequency_accuracy(self):
         sr = 44100
@@ -311,7 +332,7 @@ class TestToneSynthesis:
         for ch in range(3):
             _set_tone(p, ch, 0x100)
             _set_volume(p, ch, 0)
-        max_abs = max(abs(s) for s in p.render(64, 44100))
+        max_abs = max(abs(l) for l, r in p.render(64, 44100))
         assert abs(max_abs - 0.75) < 1e-9
 
     def test_channel_independence(self):
@@ -320,8 +341,9 @@ class TestToneSynthesis:
         _set_tone(p, 0, 0x80)
         _set_volume(p, 0, 0)
         samples = p.render(512, 44100)
-        for s in samples:
-            assert abs(abs(s) - 0.25) < 1e-9
+        for l, r in samples:
+            assert abs(abs(l) - 0.25) < 1e-9
+            assert abs(abs(r) - 0.25) < 1e-9
 
     def test_stateful_across_calls(self):
         p = PSG()
@@ -344,16 +366,18 @@ class TestToneSynthesis:
         for ch in range(3):
             _set_tone(p, ch, 1)        # very high frequency
             _set_volume(p, ch, 0)
-        for s in p.render(1024, 44100):
-            assert abs(s) <= 1.0 + 1e-9
+        for l, r in p.render(1024, 44100):
+            assert abs(l) <= 1.0 + 1e-9
+            assert abs(r) <= 1.0 + 1e-9
 
     def test_silent_channel_contributes_zero(self):
         # ch1 active, ch0 and ch2 silent → amplitude = ±0.25 only
         p = PSG()
         _set_tone(p, 1, 0x100)
         _set_volume(p, 1, 0)
-        for s in p.render(512, 44100):
-            assert abs(abs(s) - 0.25) < 1e-9
+        for l, r in p.render(512, 44100):
+            assert abs(abs(l) - 0.25) < 1e-9
+            assert abs(abs(r) - 0.25) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -370,17 +394,18 @@ class TestNoiseSynthesis:
 
     def test_silent_noise_zero(self):
         p = self._noise_only(0, False, vol=15)
-        assert all(s == 0.0 for s in p.render(256, 44100))
+        assert all(l == 0.0 and r == 0.0 for l, r in p.render(256, 44100))
 
     def test_active_noise_nonzero(self):
         p = self._noise_only(0, False, vol=0)
         samples = p.render(4096, 44100)
-        assert any(s != 0.0 for s in samples)
+        assert any(l != 0.0 or r != 0.0 for l, r in samples)
 
     def test_noise_amplitude_bounded(self):
         p = self._noise_only(0, True, vol=0)
-        for s in p.render(2048, 44100):
-            assert abs(s) <= 1.0 + 1e-9
+        for l, r in p.render(2048, 44100):
+            assert abs(l) <= 1.0 + 1e-9
+            assert abs(r) <= 1.0 + 1e-9
 
     def test_periodic_lfsr_step(self):
         # Verify manual LFSR step matches implementation
@@ -452,14 +477,16 @@ class TestNoiseSynthesis:
             _set_volume(p, ch, 0)
         p.write(0x80 | (6 << 4) | 0)
         _set_volume(p, 3, 0)
-        for s in p.render(8192, 44100):
-            assert abs(s) <= 1.0 + 1e-9
+        for l, r in p.render(8192, 44100):
+            assert abs(l) <= 1.0 + 1e-9
+            assert abs(r) <= 1.0 + 1e-9
 
     def test_noise_attenuation(self):
         p = self._noise_only(0, False, vol=4)
         expected = ATTENUATION[4] / 4.0
-        for s in p.render(512, 44100):
-            assert abs(abs(s) - expected) < 1e-9
+        for l, r in p.render(512, 44100):
+            assert abs(abs(l) - expected) < 1e-9
+            assert abs(abs(r) - expected) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -530,4 +557,54 @@ class TestIOPortsPSG:
         _set_tone(psg, 0, 0x100)
         io.write(0x7E, 0x80 | (1 << 4) | 0)   # set vol=0 via IO port
         samples = psg.render(256, 44100)
-        assert any(s != 0.0 for s in samples)
+        assert any(l != 0.0 or r != 0.0 for l, r in samples)
+
+    def test_write_06_routes_to_psg_stereo(self):
+        psg = PSG()
+        io  = _make_io(psg)
+        io.write(0x06, 0xAA)
+        assert psg._stereo == 0xAA
+
+    def test_write_06_psg_none_no_crash(self):
+        io = IOPorts(MockVDP(), MockJoypad())
+        io.write(0x06, 0x55)   # must not raise when psg is None
+
+    def test_write_06_does_not_reach_vdp(self):
+        vdp = MockVDP()
+        io  = IOPorts(vdp, MockJoypad(), PSG())
+        io.write(0x06, 0xF0)
+        assert vdp.writes == []
+
+    def test_stereo_left_only_silences_right(self):
+        # Stereo = 0x0F: all channels left-only; right side should be silent
+        psg = PSG()
+        _set_tone(psg, 0, 0x100)
+        _set_volume(psg, 0, 0)
+        psg.set_stereo(0x0F)
+        for l, r in psg.render(512, 44100):
+            assert r == 0.0
+            assert abs(abs(l) - 0.25) < 1e-9
+
+    def test_stereo_right_only_silences_left(self):
+        # Stereo = 0xF0: all channels right-only; left side should be silent
+        psg = PSG()
+        _set_tone(psg, 0, 0x100)
+        _set_volume(psg, 0, 0)
+        psg.set_stereo(0xF0)
+        for l, r in psg.render(512, 44100):
+            assert l == 0.0
+            assert abs(abs(r) - 0.25) < 1e-9
+
+    def test_stereo_all_off_yields_silence(self):
+        psg = PSG()
+        _set_tone(psg, 0, 0x100)
+        _set_volume(psg, 0, 0)
+        psg.set_stereo(0x00)
+        for l, r in psg.render(256, 44100):
+            assert l == 0.0
+            assert r == 0.0
+
+    def test_stereo_value_masked_to_byte(self):
+        psg = PSG()
+        psg.set_stereo(0x1AA)   # masked to 0xAA
+        assert psg._stereo == 0xAA

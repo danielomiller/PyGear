@@ -348,16 +348,18 @@ class VDP:
             self._line_buffer[line]  = self._compose_line(bg, sp_pixels)
             if ov:        self.status |= 0x40   # sprite overflow
             if collision: self.status |= 0x20   # sprite collision
-            # Line interrupt counter (R0 bit 4 enables, R10 is reload value)
-            if self._line_irq == 0:
+            # Line interrupt counter (R0 bit 4 enables, R10 is reload value).
+            # Decrement first, fire when it goes negative, then reload.
+            self._line_irq -= 1
+            if self._line_irq < 0:
                 self._line_irq = self.regs[10]
                 if (self.regs[0] & 0x10) and self._cpu:
                     self._cpu.request_interrupt()
-            else:
-                self._line_irq -= 1
         else:
-            # VBlank lines: reload counter from R10 each line (no fire)
-            self._line_irq = self.regs[10]
+            # VBlank lines: reload counter on last VBlank line only so it is
+            # fresh (= regs[10]) when active display begins the next frame.
+            if line == TOTAL_LINES - 1:
+                self._line_irq = self.regs[10]
 
         self._line = (line + 1) % TOTAL_LINES
 

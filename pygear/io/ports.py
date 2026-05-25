@@ -15,6 +15,7 @@ all others  0xFF
 
 Write map
 ---------
+0x06        GG stereo sound register (PSG channel left/right enable)
 0x7E        PSG data port
 0xBE        VDP data port
 0xBF        VDP control port
@@ -45,7 +46,9 @@ class IOPorts:
     def write(self, port: int, value: int) -> None:
         port  &= 0xFF
         value &= 0xFF
-        if port == 0x7E and self._psg is not None:
+        if port == 0x06 and self._psg is not None:
+            self._psg.set_stereo(value)
+        elif port == 0x7E and self._psg is not None:
             self._psg.write(value)
         elif port in _VDP_WRITE:
             self._vdp.port_write(port, value)

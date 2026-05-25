@@ -35,8 +35,9 @@ class GameGearConsole:
         VBlank and line interrupts are delivered between CPU instruction
         boundaries rather than at the end of the whole frame.
 
-        Returns a list of floats ([-1.0, +1.0]) at SAMPLE_RATE Hz sized
-        for exactly one 60 Hz frame (~735 samples).
+        Returns a list of (left, right) float pairs ([-1.0, +1.0] each) at
+        SAMPLE_RATE Hz sized for exactly one 60 Hz frame (~735 samples).
+        Stereo routing is controlled by the GG stereo register (port 0x06).
         """
         for _ in range(TOTAL_LINES):
             self.cpu.run_cycles(CYCLES_PER_LINE)
