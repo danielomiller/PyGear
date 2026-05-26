@@ -56,8 +56,26 @@ def main() -> None:
     parser.add_argument("rom",   help="path to .gg ROM file")
     parser.add_argument("--scale", type=int, default=DEFAULT_SCALE,
                         help="display scale factor (default: 3)")
+    parser.add_argument("--debug", action="store_true",
+                        help="start the interactive Z80 debugger instead of the emulator")
     args = parser.parse_args()
 
+    # ------------------------------------------------------------------
+    # Debug mode — skip pygame entirely
+    # ------------------------------------------------------------------
+    if args.debug:
+        try:
+            cart = Cartridge(args.rom)
+        except FileNotFoundError:
+            print(f"ROM not found: {args.rom}", file=sys.stderr)
+            sys.exit(1)
+        from pygear.debugger import Debugger
+        Debugger(GameGearConsole(cart)).repl()
+        return
+
+    # ------------------------------------------------------------------
+    # Normal emulator mode
+    # ------------------------------------------------------------------
     if args.scale < 1:
         parser.error("--scale must be at least 1")
 
