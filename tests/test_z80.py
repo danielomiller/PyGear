@@ -3089,6 +3089,19 @@ class TestED:
         assert cpu.IFF1 is True
         assert cycles == 14
 
+    def test_retn_mirrors(self):
+        # ED 5D, 6D, 7D must behave identically to ED 45 (RETN)
+        for opcode in (0x5D, 0x6D, 0x7D):
+            cpu = make_cpu()
+            cpu.IFF2 = True; cpu.IFF1 = False
+            cpu.SP = 0xFFFD
+            cpu._write16(0xFFFD, 0x6000)
+            load_prog(cpu, [0xED, opcode])
+            cycles = cpu.step()
+            assert cpu.PC == 0x6000,  f"ED {opcode:02X}: PC wrong"
+            assert cpu.IFF1 is True,  f"ED {opcode:02X}: IFF1 not restored"
+            assert cycles == 14,      f"ED {opcode:02X}: cycles wrong"
+
 
 class TestBlock:
     """ED-prefix block transfer/search/IO instructions."""

@@ -1167,7 +1167,7 @@ def build_all_tables(cpu):
         cpu.PC   = cpu._pop()
         return 14
 
-    for _op in (0x45, 0x55, 0x65, 0x75):
+    for _op in (0x45, 0x55, 0x65, 0x75, 0x5D, 0x6D, 0x7D):
         ed[_op] = op_retn
 
     def op_reti():
