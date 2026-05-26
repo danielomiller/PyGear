@@ -7,6 +7,7 @@ Default scale is 3 (480×432 window).  Press Escape or close the window to quit.
 """
 
 import argparse
+import datetime
 import sys
 
 import numpy as np
@@ -37,6 +38,15 @@ def frame_to_surface(frame, scale: int) -> pygame.Surface:
     if scale != 1:
         surf = pygame.transform.scale(surf, (SCREEN_W * scale, SCREEN_H * scale))
     return surf
+
+
+def _save_screenshot(frame, scale: int, rom_name: str) -> None:
+    surf = frame_to_surface(frame, scale)
+    stem = rom_name.rsplit(".", 1)[0]
+    ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = f"{stem}_{ts}.png"
+    pygame.image.save(surf, path)
+    print(f"Screenshot saved: {path}")
 
 
 def main() -> None:
@@ -78,6 +88,8 @@ def main() -> None:
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
+                elif event.key == pygame.K_F12:
+                    _save_screenshot(console.vdp.frame, scale, rom_name)
                 elif event.key in KEY_MAP:
                     console.joypad.press(KEY_MAP[event.key])
             elif event.type == pygame.KEYUP:
