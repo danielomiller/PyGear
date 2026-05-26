@@ -134,6 +134,7 @@ def render_sprite_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
     tall      = bool(regs[1] & 0x02)
     zoom      = bool(regs[1] & 0x01)
     tile_base = (regs[6] & 0x04) << 11
+    ec_shift  = -8 if (regs[0] & 0x08) else 0
 
     visible, overflow = sprites_on_line(vram, regs, line)
 
@@ -172,7 +173,7 @@ def render_sprite_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
             cram_idx = color_idx + 16     # always palette 1
 
             # Each column covers 1 screen pixel (or 2 with zoom)
-            sx0 = x + col * (2 if zoom else 1)
+            sx0 = x + ec_shift + col * (2 if zoom else 1)
             for sx in range(sx0, sx0 + (2 if zoom else 1)):
                 if sx < 0 or sx > 255:
                     continue

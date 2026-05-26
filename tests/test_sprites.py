@@ -34,6 +34,18 @@ def sat_terminate(vram, regs, n):
     vram[(base + n) & 0x3FFF] = 0xD0
 
 
+def make_solid_sprite(x: int, tile_num: int = 0):
+    """Return (vram, regs) with one opaque 8×8 sprite (all pixels color 1) at X=x, Y=0."""
+    vram = make_vram()
+    regs = make_regs(r5=0x7E)
+    # Write solid tile 0: all pixels = color index 1 (b0=0xFF, others=0)
+    for row in range(8):
+        vram[tile_num * 32 + row * 4] = 0xFF   # bitplane 0 all-1 → color index 1
+    sat_write(vram, regs, 0, 0, x, tile_num)   # sprite at Y=0, visible on line 1
+    sat_terminate(vram, regs, 1)
+    return vram, regs
+
+
 # ---------------------------------------------------------------------------
 # TestSATParser
 # ---------------------------------------------------------------------------
@@ -648,6 +660,47 @@ class TestSpriteLineRenderer:
         sat_terminate(vram, regs, 9)
         _, _, overflow, _ = render_sprite_line(vram, regs, 1)
         assert overflow is True
+
+    # --- EC bit (R0 bit 3): 8-pixel left shift ----------------------------
+
+    def test_ec_bit_clear_sprite_at_x0_occupies_cols_0_to_7(self):
+        vram, regs = make_solid_sprite(x=0)
+        # R0 bit 3 = 0 (EC off) — sprite at X=0 fills columns 0–7
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_has[0:8].all()
+        assert not sp_has[8]
+
+    def test_ec_bit_set_shifts_sprite_left_8(self):
+        vram, regs = make_solid_sprite(x=0)
+        regs[0] |= 0x08   # set EC bit
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        # All 8 columns shifted off the left edge — nothing visible
+        assert not sp_has.any()
+
+    def test_ec_bit_set_sprite_at_x8_occupies_cols_0_to_7(self):
+        vram, regs = make_solid_sprite(x=8)
+        regs[0] |= 0x08
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_has[0:8].all()
+        assert not sp_has[8]
+
+    def test_ec_bit_set_partial_clip_at_left_edge(self):
+        # Sprite at X=4 with EC: effective X = -4, so cols 0–3 visible, 4–7 clipped
+        vram, regs = make_solid_sprite(x=4)
+        regs[0] |= 0x08
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_has[0:4].all()
+        assert not sp_has[4:8].any()
+
+    def test_ec_bit_does_not_affect_collision_detection(self):
+        # Two sprites that overlap after the EC shift should still flag collision
+        vram, regs = make_solid_sprite(x=8)   # effective X=0 with EC
+        regs[0] |= 0x08
+        # Add a second sprite also landing at effective X=0
+        sat_write(vram, regs, 1, 0, 8, 0)    # same tile, same effective position
+        sat_terminate(vram, regs, 2)
+        _, _, _, collision = render_sprite_line(vram, regs, 1)
+        assert collision is True
 
 
 # ---------------------------------------------------------------------------
