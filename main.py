@@ -30,6 +30,8 @@ KEY_MAP = {
     pygame.K_RETURN: START,
 }
 
+PAUSE_KEYS = {pygame.K_p, pygame.K_PAUSE}
+
 
 def frame_to_surface(frame, scale: int) -> pygame.Surface:
     """Convert a 144×160 numpy RGB array (or list-of-RGB) frame to a scaled pygame Surface."""
@@ -89,6 +91,8 @@ def main() -> None:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         running = False
+                    elif event.key in PAUSE_KEYS:
+                        console.trigger_pause()
                     elif event.key == pygame.K_F5:
                         path = console.save_state()
                         print(f"State saved: {path}")

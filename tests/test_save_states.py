@@ -385,3 +385,34 @@ class TestConsoleSaveState:
         assert console.cpu.A == 0x11
         console.load_state(slot=1)
         assert console.cpu.A == 0x22
+
+
+# ---------------------------------------------------------------------------
+# Pause button
+
+class TestPauseButton:
+
+    def test_trigger_pause_sets_nmi_pending(self):
+        console = _make_console()
+        assert console.cpu._nmi_pending is False
+        console.trigger_pause()
+        assert console.cpu._nmi_pending is True
+
+    def test_nmi_consumed_and_jumps_to_0x0066(self):
+        console = _make_console()
+        console.cpu.PC  = 0x1000
+        console.cpu.SP  = 0xFFFF
+        console.cpu.IFF1 = True
+        console.trigger_pause()
+        console.cpu.step()
+        assert console.cpu._nmi_pending is False
+        assert console.cpu.PC == 0x0066
+
+    def test_trigger_pause_survives_save_state(self, tmp_path):
+        console = _make_console()
+        console._sav_path = str(tmp_path / "game.sav")
+        console.trigger_pause()
+        console.save_state()
+        console.cpu._nmi_pending = False
+        console.load_state()
+        assert console.cpu._nmi_pending is True

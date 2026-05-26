@@ -36,6 +36,10 @@ class GameGearConsole:
         """Flush battery-backed cart RAM to disk. Returns True if file was written."""
         return self.bus.save_sav(self._sav_path)
 
+    def trigger_pause(self) -> None:
+        """Fire the NMI that the physical PAUSE button generates."""
+        self.cpu.request_nmi()
+
     # ------------------------------------------------------------------
     # Save states
     # ------------------------------------------------------------------
