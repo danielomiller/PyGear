@@ -34,6 +34,7 @@ class SegaMapper:
         self._cart_ram = bytearray(_CART_RAM_SIZE)
         self._cart_ram_bank = 0
         self._cart_ram_enabled = False
+        self._cart_ram_dirty = False   # True once any byte has been written
 
     # ------------------------------------------------------------------
     def reset(self):
@@ -41,6 +42,8 @@ class SegaMapper:
         self._ctrl = 0x00
         self._cart_ram_bank = 0
         self._cart_ram_enabled = False
+        # _cart_ram and _cart_ram_dirty intentionally not cleared —
+        # battery-backed SRAM survives a console reset.
 
     # ------------------------------------------------------------------
     def write_rom_area(self, addr: int, value: int):
@@ -86,6 +89,26 @@ class SegaMapper:
             offset = addr & 0x3FFF
             ram_addr = self._cart_ram_bank * 0x4000 + offset
             self._cart_ram[ram_addr % _CART_RAM_SIZE] = value & 0xFF
+            self._cart_ram_dirty = True
+
+    # ------------------------------------------------------------------
+    def load_sav(self, path: str) -> bool:
+        """Load cart RAM from *path*. Returns True on success, False if not found."""
+        try:
+            with open(path, "rb") as f:
+                data = f.read(_CART_RAM_SIZE)
+            self._cart_ram[:len(data)] = data
+            return True
+        except FileNotFoundError:
+            return False
+
+    def save_sav(self, path: str) -> bool:
+        """Write cart RAM to *path*. Returns True if written, False if nothing to save."""
+        if not self._cart_ram_dirty:
+            return False
+        with open(path, "wb") as f:
+            f.write(self._cart_ram)
+        return True
 
     @property
     def slot_banks(self):
@@ -134,6 +157,12 @@ class CodemastersMapper:
         """Bank register at $8000; upper bits reserved for future SRAM support."""
         if addr == 0x8000:
             self._slots[2] = value % self.cart.bank_count
+
+    def load_sav(self, path: str) -> bool:
+        return False  # no persistent RAM in base Codemasters mapper
+
+    def save_sav(self, path: str) -> bool:
+        return False
 
     @property
     def slot_banks(self):

@@ -20,6 +20,7 @@ _CODEMASTERS_CHECKSUM_OFFSET = 0x7FE6  # 16-bit LE checksum of bytes 0x0000–0x
 
 class Cartridge:
     def __init__(self, path: str):
+        self._path = path
         with open(path, "rb") as f:
             data = f.read()
 
@@ -33,6 +34,14 @@ class Cartridge:
 
         self._parse_header()
         self.is_codemasters = self._detect_codemasters()
+
+    @property
+    def sav_path(self) -> str:
+        """Path for the battery-backed SRAM save file (.sav alongside the ROM)."""
+        base = self._path
+        if base.lower().endswith(".gg"):
+            base = base[:-3]
+        return base + ".sav"
 
     # ------------------------------------------------------------------
     def _parse_header(self):

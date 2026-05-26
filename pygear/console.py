@@ -13,13 +13,15 @@ class GameGearConsole:
     SAMPLE_RATE = 44100
 
     def __init__(self, cart: Cartridge) -> None:
-        self.vdp    = VDP()
-        self.joypad = Joypad()
-        self.psg    = PSG()
-        self.bus    = MemoryBus(cart)
-        self.ports  = IOPorts(self.vdp, self.joypad, self.psg)
-        self.cpu    = Z80(self.bus, self.ports)
+        self.vdp      = VDP()
+        self.joypad   = Joypad()
+        self.psg      = PSG()
+        self.bus      = MemoryBus(cart)
+        self.ports    = IOPorts(self.vdp, self.joypad, self.psg)
+        self.cpu      = Z80(self.bus, self.ports)
+        self._sav_path = cart.sav_path
         self.vdp.attach_cpu(self.cpu)
+        self.bus.load_sav(self._sav_path)   # no-op if file absent
 
     def reset(self) -> None:
         self.bus.reset()
@@ -27,6 +29,10 @@ class GameGearConsole:
         self.joypad.reset()
         self.psg.reset()
         self.cpu.reset()
+
+    def save_sav(self) -> bool:
+        """Flush battery-backed cart RAM to disk. Returns True if file was written."""
+        return self.bus.save_sav(self._sav_path)
 
     def step_frame(self) -> list:
         """Advance one video frame (262 scanlines) and return audio samples.

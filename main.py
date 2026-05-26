@@ -80,48 +80,52 @@ def main() -> None:
     frame_num = 0
 
     running = True
-    while running:
-        # --- Events ---
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+    try:
+        while running:
+            # --- Events ---
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
                     running = False
-                elif event.key == pygame.K_F12:
-                    _save_screenshot(console.vdp.frame, scale, rom_name)
-                elif event.key in KEY_MAP:
-                    console.joypad.press(KEY_MAP[event.key])
-            elif event.type == pygame.KEYUP:
-                if event.key in KEY_MAP:
-                    console.joypad.release(KEY_MAP[event.key])
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+                    elif event.key == pygame.K_F12:
+                        _save_screenshot(console.vdp.frame, scale, rom_name)
+                    elif event.key in KEY_MAP:
+                        console.joypad.press(KEY_MAP[event.key])
+                elif event.type == pygame.KEYUP:
+                    if event.key in KEY_MAP:
+                        console.joypad.release(KEY_MAP[event.key])
 
-        # --- Emulate one frame ---
-        audio = console.step_frame()
+            # --- Emulate one frame ---
+            audio = console.step_frame()
 
-        # --- Video ---
-        if console.vdp.frame_ready:
-            console.vdp.frame_ready = False
-            surf = frame_to_surface(console.vdp.frame, scale)
-            screen.blit(surf, (0, 0))
-            pygame.display.flip()
+            # --- Video ---
+            if console.vdp.frame_ready:
+                console.vdp.frame_ready = False
+                surf = frame_to_surface(console.vdp.frame, scale)
+                screen.blit(surf, (0, 0))
+                pygame.display.flip()
 
-        # --- Audio ---
-        # audio is a list of (left, right) float pairs; shape (n_samples, 2)
-        arr   = np.clip(np.array(audio) * 32767, -32767, 32767).astype(np.int16)
-        sound = pygame.sndarray.make_sound(arr)
-        if audio_ch.get_busy():
-            audio_ch.queue(sound)   # double-buffer: replace queued frame, never drop
-        else:
-            audio_ch.play(sound)
+            # --- Audio ---
+            # audio is a list of (left, right) float pairs; shape (n_samples, 2)
+            arr   = np.clip(np.array(audio) * 32767, -32767, 32767).astype(np.int16)
+            sound = pygame.sndarray.make_sound(arr)
+            if audio_ch.get_busy():
+                audio_ch.queue(sound)   # double-buffer: replace queued frame, never drop
+            else:
+                audio_ch.play(sound)
 
-        clock.tick(60)
-        frame_num += 1
-        if frame_num % 60 == 0:
-            fps = clock.get_fps()
-            pygame.display.set_caption(f"PyGear — {rom_name}  {fps:.0f} fps")
+            clock.tick(60)
+            frame_num += 1
+            if frame_num % 60 == 0:
+                fps = clock.get_fps()
+                pygame.display.set_caption(f"PyGear — {rom_name}  {fps:.0f} fps")
 
-    pygame.quit()
+    finally:
+        if console.save_sav():
+            print(f"Saved: {console._sav_path}")
+        pygame.quit()
 
 
 if __name__ == "__main__":

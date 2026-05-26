@@ -30,6 +30,12 @@ class MemoryBus:
         self.ram.reset()
         self.mapper.reset()
 
+    def load_sav(self, path: str) -> bool:
+        return self.mapper.load_sav(path)
+
+    def save_sav(self, path: str) -> bool:
+        return self.mapper.save_sav(path)
+
     # ------------------------------------------------------------------
     def read(self, addr: int) -> int:
         addr &= 0xFFFF

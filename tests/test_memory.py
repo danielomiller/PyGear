@@ -223,6 +223,33 @@ class TestCartridge:
 
 
 # ---------------------------------------------------------------------------
+# TestCartridgeSavPath
+
+class TestCartridgeSavPath:
+
+    def test_sav_path_replaces_gg_extension(self):
+        cart = _make_cart(64)
+        assert cart.sav_path.endswith(".sav")
+        assert not cart.sav_path.endswith(".gg.sav")
+
+    def test_sav_path_same_directory(self):
+        cart = _make_cart(64)
+        assert cart.sav_path[:-4] == cart._path[:-3]
+
+    def test_sav_path_uppercase_extension(self):
+        # Cartridge strips the .GG suffix regardless of case.
+        size = 32 * 1024
+        data = bytearray(size)
+        tmp = tempfile.NamedTemporaryFile(suffix=".GG", delete=False)
+        tmp.write(data)
+        tmp.close()
+        cart = Cartridge(tmp.name)
+        os.unlink(tmp.name)
+        assert cart.sav_path.endswith(".sav")
+        assert not cart.sav_path.endswith(".GG.sav")
+
+
+# ---------------------------------------------------------------------------
 # TestSegaMapper
 
 class TestSegaMapper:
@@ -374,6 +401,77 @@ class TestSegaMapper:
         mapper.reset()
         assert mapper.slot_banks == (0, 1, 2)
         assert mapper._cart_ram_enabled is False
+
+    def test_reset_preserves_cart_ram_contents(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)
+        mapper.write_slot2(0x8000, 0xBE)
+        mapper.reset()
+        mapper.write_register(0, 0x08)   # re-enable to peek
+        assert mapper.read_slot2(0x8000) == 0xBE
+
+    def test_reset_preserves_dirty_flag(self):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)
+        mapper.write_slot2(0x8000, 0x01)
+        assert mapper._cart_ram_dirty is True
+        mapper.reset()
+        assert mapper._cart_ram_dirty is True
+
+    # --- save / load ---
+
+    def test_save_sav_returns_false_when_not_dirty(self, tmp_path):
+        mapper = SegaMapper(_make_cart(64))
+        assert mapper.save_sav(str(tmp_path / "out.sav")) is False
+        assert not (tmp_path / "out.sav").exists()
+
+    def test_save_sav_writes_file_when_dirty(self, tmp_path):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)
+        mapper.write_slot2(0x8005, 0xAB)
+        path = str(tmp_path / "out.sav")
+        assert mapper.save_sav(path) is True
+        assert os.path.exists(path)
+
+    def test_save_sav_persists_data(self, tmp_path):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)
+        mapper.write_slot2(0x8010, 0xCD)
+        path = str(tmp_path / "out.sav")
+        mapper.save_sav(path)
+        raw = open(path, "rb").read()
+        assert raw[0x0010] == 0xCD
+
+    def test_load_sav_returns_false_when_missing(self, tmp_path):
+        mapper = SegaMapper(_make_cart(64))
+        assert mapper.load_sav(str(tmp_path / "no.sav")) is False
+
+    def test_load_sav_restores_data(self, tmp_path):
+        mapper = SegaMapper(_make_cart(64))
+        mapper.write_register(0, 0x08)
+        mapper.write_slot2(0x8020, 0xEF)
+        path = str(tmp_path / "save.sav")
+        mapper.save_sav(path)
+
+        mapper2 = SegaMapper(_make_cart(64))
+        assert mapper2.load_sav(path) is True
+        mapper2.write_register(0, 0x08)
+        assert mapper2.read_slot2(0x8020) == 0xEF
+
+    def test_roundtrip_save_and_load(self, tmp_path):
+        cart = _make_cart(64)
+        path = str(tmp_path / "rt.sav")
+        m1 = SegaMapper(cart)
+        m1.write_register(0, 0x08)
+        for i in range(16):
+            m1.write_slot2(0x8000 + i, i * 3)
+        m1.save_sav(path)
+
+        m2 = SegaMapper(cart)
+        m2.load_sav(path)
+        m2.write_register(0, 0x08)
+        for i in range(16):
+            assert m2.read_slot2(0x8000 + i) == i * 3
 
 
 # ---------------------------------------------------------------------------
