@@ -139,6 +139,47 @@ class VDP:
         self.frame        = None
         self.frame_ready  = False
 
+    def get_state(self) -> dict:
+        return {
+            'vram':         bytes(self.vram),
+            'cram':         bytes(self.cram),
+            'regs':         bytes(self.regs),
+            'status':       self.status,
+            '_addr':        self._addr,
+            '_code':        self._code,
+            '_latch':       self._latch,
+            '_latch_lo':    self._latch_lo,
+            '_read_buf':    self._read_buf,
+            '_line':        self._line,
+            '_cycle':       self._cycle,
+            '_line_irq':    self._line_irq,
+            '_line_buffer': [b.tobytes() if b is not None else None
+                             for b in self._line_buffer],
+            'frame_ready':  self.frame_ready,
+        }
+
+    def set_state(self, s: dict) -> None:
+        self.vram[:]  = s['vram']
+        self.cram[:]  = s['cram']
+        self.regs[:]  = s['regs']
+        self.status   = s['status']
+        self._addr    = s['_addr']
+        self._code    = s['_code']
+        self._latch   = s['_latch']
+        self._latch_lo = s['_latch_lo']
+        self._read_buf = s['_read_buf']
+        self._line    = s['_line']
+        self._cycle   = s['_cycle']
+        self._line_irq = s['_line_irq']
+        self._line_buffer = [
+            np.frombuffer(b, dtype=np.uint8).copy() if b is not None else None
+            for b in s['_line_buffer']
+        ]
+        self.frame_ready = s['frame_ready']
+        # Rebuild frame from last complete line buffer if available
+        if any(b is not None for b in self._line_buffer):
+            self._assemble_frame()
+
     # ------------------------------------------------------------------
     # Port interface
     # ------------------------------------------------------------------

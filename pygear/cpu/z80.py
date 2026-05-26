@@ -292,5 +292,41 @@ class Z80:
         self.IM = 1
         self.halted = False
         self._int_pending = self._nmi_pending = self._ei_delay = False
+
+    def get_state(self) -> dict:
+        return {
+            'A': self.A,  'F': self.F,  'B': self.B,  'C': self.C,
+            'D': self.D,  'E': self.E,  'H': self.H,  'L': self.L,
+            'A_': self.A_, 'F_': self.F_, 'B_': self.B_, 'C_': self.C_,
+            'D_': self.D_, 'E_': self.E_, 'H_': self.H_, 'L_': self.L_,
+            'IX': self.IX, 'IY': self.IY, 'SP': self.SP, 'PC': self.PC,
+            'I': self.I,   'R': self.R,
+            'IM': self.IM,
+            'IFF1': self.IFF1, 'IFF2': self.IFF2,
+            'halted': self.halted,
+            '_int_pending': self._int_pending,
+            '_nmi_pending': self._nmi_pending,
+            '_ei_delay': self._ei_delay,
+            'cycles': self.cycles,
+        }
+
+    def set_state(self, s: dict) -> None:
+        self.A  = s['A'];  self.F  = s['F']
+        self.B  = s['B'];  self.C  = s['C']
+        self.D  = s['D'];  self.E  = s['E']
+        self.H  = s['H'];  self.L  = s['L']
+        self.A_ = s['A_']; self.F_ = s['F_']
+        self.B_ = s['B_']; self.C_ = s['C_']
+        self.D_ = s['D_']; self.E_ = s['E_']
+        self.H_ = s['H_']; self.L_ = s['L_']
+        self.IX = s['IX']; self.IY = s['IY']
+        self.SP = s['SP']; self.PC = s['PC']
+        self.I  = s['I'];  self.R  = s['R']
+        self.IM = s['IM']
+        self.IFF1 = s['IFF1']; self.IFF2 = s['IFF2']
+        self.halted       = s['halted']
+        self._int_pending = s['_int_pending']
+        self._nmi_pending = s['_nmi_pending']
+        self._ei_delay    = s['_ei_delay']
+        self.cycles       = s['cycles']
         self._dd = self._fd = False
-        self.cycles = 0

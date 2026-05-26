@@ -89,6 +89,14 @@ def main() -> None:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         running = False
+                    elif event.key == pygame.K_F5:
+                        path = console.save_state()
+                        print(f"State saved: {path}")
+                    elif event.key == pygame.K_F8:
+                        if console.load_state():
+                            print("State loaded.")
+                        else:
+                            print("No save state found.", file=sys.stderr)
                     elif event.key == pygame.K_F12:
                         _save_screenshot(console.vdp.frame, scale, rom_name)
                     elif event.key in KEY_MAP:

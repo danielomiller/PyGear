@@ -49,6 +49,12 @@ class Joypad:
     def reset(self) -> None:
         self._pressed.clear()
 
+    def get_state(self) -> dict:
+        return {'_pressed': set(self._pressed)}
+
+    def set_state(self, s: dict) -> None:
+        self._pressed = set(s['_pressed'])
+
     def port_00(self) -> int:
         """Return the byte read from port 0x00 (START button, active-low)."""
         value = 0xFF

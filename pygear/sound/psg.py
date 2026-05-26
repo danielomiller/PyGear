@@ -113,6 +113,30 @@ class PSG:
         self._lfsr          = 0x8000
         self._noise_counter = 0.0
 
+    def get_state(self) -> dict:
+        return {
+            '_tone_period':   list(self._tone_period),
+            '_volume':        list(self._volume),
+            '_noise_ctrl':    self._noise_ctrl,
+            '_latch_reg':     self._latch_reg,
+            '_stereo':        self._stereo,
+            '_tone_counter':  list(self._tone_counter),
+            '_tone_flip':     list(self._tone_flip),
+            '_lfsr':          self._lfsr,
+            '_noise_counter': self._noise_counter,
+        }
+
+    def set_state(self, s: dict) -> None:
+        self._tone_period   = s['_tone_period']
+        self._volume        = s['_volume']
+        self._noise_ctrl    = s['_noise_ctrl']
+        self._latch_reg     = s['_latch_reg']
+        self._stereo        = s['_stereo']
+        self._tone_counter  = s['_tone_counter']
+        self._tone_flip     = s['_tone_flip']
+        self._lfsr          = s['_lfsr']
+        self._noise_counter = s['_noise_counter']
+
     # ------------------------------------------------------------------
     def set_stereo(self, value: int) -> None:
         """Write the Game Gear stereo control register (port 0x06).

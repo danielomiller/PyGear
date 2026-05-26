@@ -1,5 +1,7 @@
 """Game Gear console — wires all hardware subsystems and drives frame emulation."""
 
+import pickle
+
 from .cartridge import Cartridge
 from .cpu.z80 import Z80
 from .vdp.vdp import VDP, CYCLES_PER_LINE, TOTAL_LINES
@@ -33,6 +35,43 @@ class GameGearConsole:
     def save_sav(self) -> bool:
         """Flush battery-backed cart RAM to disk. Returns True if file was written."""
         return self.bus.save_sav(self._sav_path)
+
+    # ------------------------------------------------------------------
+    # Save states
+    # ------------------------------------------------------------------
+
+    def _state_path(self, slot: int) -> str:
+        base = self._sav_path[:-4]   # strip ".sav"
+        return f"{base}_s{slot}.state"
+
+    def save_state(self, slot: int = 0) -> str:
+        """Serialize the full console state to disk. Returns the file path."""
+        state = {
+            'cpu':    self.cpu.get_state(),
+            'vdp':    self.vdp.get_state(),
+            'psg':    self.psg.get_state(),
+            'bus':    self.bus.get_state(),
+            'joypad': self.joypad.get_state(),
+        }
+        path = self._state_path(slot)
+        with open(path, 'wb') as f:
+            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+        return path
+
+    def load_state(self, slot: int = 0) -> bool:
+        """Restore console state from disk. Returns True on success."""
+        path = self._state_path(slot)
+        try:
+            with open(path, 'rb') as f:
+                state = pickle.load(f)
+        except FileNotFoundError:
+            return False
+        self.cpu.set_state(state['cpu'])
+        self.vdp.set_state(state['vdp'])
+        self.psg.set_state(state['psg'])
+        self.bus.set_state(state['bus'])
+        self.joypad.set_state(state['joypad'])
+        return True
 
     def step_frame(self) -> list:
         """Advance one video frame (262 scanlines) and return audio samples.

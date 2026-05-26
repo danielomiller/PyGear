@@ -92,6 +92,24 @@ class SegaMapper:
             self._cart_ram_dirty = True
 
     # ------------------------------------------------------------------
+    def get_state(self) -> dict:
+        return {
+            '_slots':            list(self._slots),
+            '_ctrl':             self._ctrl,
+            '_cart_ram':         bytes(self._cart_ram),
+            '_cart_ram_bank':    self._cart_ram_bank,
+            '_cart_ram_enabled': self._cart_ram_enabled,
+            '_cart_ram_dirty':   self._cart_ram_dirty,
+        }
+
+    def set_state(self, s: dict) -> None:
+        self._slots            = list(s['_slots'])
+        self._ctrl             = s['_ctrl']
+        self._cart_ram[:]      = s['_cart_ram']
+        self._cart_ram_bank    = s['_cart_ram_bank']
+        self._cart_ram_enabled = s['_cart_ram_enabled']
+        self._cart_ram_dirty   = s['_cart_ram_dirty']
+
     def load_sav(self, path: str) -> bool:
         """Load cart RAM from *path*. Returns True on success, False if not found."""
         try:
@@ -157,6 +175,12 @@ class CodemastersMapper:
         """Bank register at $8000; upper bits reserved for future SRAM support."""
         if addr == 0x8000:
             self._slots[2] = value % self.cart.bank_count
+
+    def get_state(self) -> dict:
+        return {'_slots': list(self._slots)}
+
+    def set_state(self, s: dict) -> None:
+        self._slots = list(s['_slots'])
 
     def load_sav(self, path: str) -> bool:
         return False  # no persistent RAM in base Codemasters mapper

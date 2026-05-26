@@ -36,6 +36,13 @@ class MemoryBus:
     def save_sav(self, path: str) -> bool:
         return self.mapper.save_sav(path)
 
+    def get_state(self) -> dict:
+        return {'ram': self.ram.get_state(), 'mapper': self.mapper.get_state()}
+
+    def set_state(self, s: dict) -> None:
+        self.ram.set_state(s['ram'])
+        self.mapper.set_state(s['mapper'])
+
     # ------------------------------------------------------------------
     def read(self, addr: int) -> int:
         addr &= 0xFFFF

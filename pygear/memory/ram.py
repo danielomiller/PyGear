@@ -16,3 +16,9 @@ class RAM:
     def reset(self):
         for i in range(self.SIZE):
             self._mem[i] = 0
+
+    def get_state(self) -> dict:
+        return {'mem': bytes(self._mem)}
+
+    def set_state(self, s: dict) -> None:
+        self._mem[:] = s['mem']
