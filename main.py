@@ -66,6 +66,8 @@ def main() -> None:
 
     console   = GameGearConsole(cart)
     audio_ch  = pygame.mixer.Channel(0)
+    rom_name  = args.rom.rsplit("/", 1)[-1]
+    frame_num = 0
 
     running = True
     while running:
@@ -102,6 +104,10 @@ def main() -> None:
             audio_ch.play(sound)
 
         clock.tick(60)
+        frame_num += 1
+        if frame_num % 60 == 0:
+            fps = clock.get_fps()
+            pygame.display.set_caption(f"PyGear — {rom_name}  {fps:.0f} fps")
 
     pygame.quit()
 
