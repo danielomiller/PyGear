@@ -609,9 +609,10 @@ _NAME_TABLE_BASE = 0x3800   # R2 = 0xFF  →  (0xFF & 0x0E) << 10 = 0x3800
 
 
 def make_bg_vdp() -> VDP:
-    """VDP with name table at 0x3800, no scroll, no scroll-lock."""
+    """VDP with name table at 0x3800, no scroll, no scroll-lock, display enabled."""
     vdp = VDP()
     vdp.reset()
+    vdp.regs[1] = 0x40   # display enable (bit 6)
     vdp.regs[2] = 0xFF   # name table at 0x3800
     vdp.regs[8] = 0      # H-scroll = 0
     vdp.regs[9] = 0      # V-scroll = 0
@@ -1568,6 +1569,56 @@ class TestVDPTiming:
         step_lines(vdp, TOTAL_LINES)
         assert tuple(vdp.frame[0][0]) == (0, 255, 0)
 
+    # -- Display enable (R1 bit 6) ------------------------------------------
+
+    def test_display_disabled_shows_backdrop_color(self):
+        # When R1 bit 6 = 0 every pixel shows backdrop (sprite palette, R7[3:0]).
+        vdp = make_bg_vdp()
+        write_cram_color(vdp, 1, r4=0xF, g4=0, b4=0)    # tile colour (red)
+        write_solid_tile(vdp, 1, color=1)
+        write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=1)
+        # CRAM index 16 = first sprite palette entry = backdrop
+        write_cram_color(vdp, 16, r4=0, g4=0, b4=0xF)   # backdrop = blue
+        vdp.regs[7] = 0x00  # R7[3:0] = 0 → backdrop is CRAM index 16
+        # R1 bit 6 = 0 (display off); bit 5 = 1 (VBlank IRQ on so frame assembles)
+        vdp.regs[1] = 0x20
+        step_lines(vdp, ACTIVE_LINES)
+        # Every pixel must be the backdrop colour, not the tile colour
+        assert tuple(vdp.frame[0][0]) == (0, 0, 255)
+
+    def test_display_disabled_all_pixels_are_backdrop(self):
+        # All 160×144 pixels must be backdrop when display is off.
+        vdp = make_bg_vdp()
+        write_cram_color(vdp, 17, r4=0xF, g4=0xF, b4=0)  # backdrop = yellow (CRAM 17)
+        vdp.regs[7] = 0x01   # R7[3:0] = 1 → backdrop is CRAM index 16+1 = 17
+        vdp.regs[1] = 0x20   # display off (bit 6 = 0), VBlank IRQ on
+        step_lines(vdp, ACTIVE_LINES)
+        for row in range(SCREEN_H):
+            for col in range(SCREEN_W):
+                assert tuple(vdp.frame[row][col]) == (255, 255, 0), \
+                    f"pixel ({row},{col}) not backdrop"
+
+    def test_display_enable_shows_tile(self):
+        # With R1 bit 6 = 1 the tile colour reaches the framebuffer.
+        vdp = make_bg_vdp()
+        write_cram_color(vdp, 1, r4=0, g4=0xF, b4=0)   # tile colour = green
+        write_solid_tile(vdp, 1, color=1)
+        write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=1)
+        vdp.regs[1] = 0x40   # display enable (bit 6), no VBlank IRQ
+        step_lines(vdp, ACTIVE_LINES)
+        assert tuple(vdp.frame[0][0]) == (0, 255, 0)
+
+    def test_display_enable_r7_backdrop_index(self):
+        # R7 backdrop index selects among the 16 sprite palette entries.
+        vdp = make_bg_vdp()
+        # CRAM indices 16–31 are sprite palette; R7[3:0]=5 → CRAM index 21
+        write_cram_color(vdp, 21, r4=0xA, g4=0x5, b4=0x0)
+        expected = (0xAA, 0x55, 0x00)
+        vdp.regs[7] = 0x05
+        vdp.regs[1] = 0x20   # display off
+        step_lines(vdp, ACTIVE_LINES)
+        assert tuple(vdp.frame[0][0]) == expected
+
 
 # ---------------------------------------------------------------------------
 # End-to-end integration
@@ -1582,7 +1633,7 @@ class TestIntegration:
         vdp = make_bg_vdp()
         cpu = MockCPU()
         vdp.attach_cpu(cpu)
-        vdp.regs[1] = 0x20    # enable VBlank interrupt
+        vdp.regs[1] = 0x60    # display enable (bit 6) + VBlank IRQ (bit 5)
 
         # CRAM entry 7 → orange-ish (R=F, G=8, B=0)
         write_cram_color(vdp, 7, r4=0xF, g4=0x8, b4=0)

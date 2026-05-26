@@ -680,6 +680,7 @@ _COMP_SAT = 0x3F00   # R5=0x7E → (0x7E & 0x7E) << 7 = 0x3F00
 
 def make_comp_vdp():
     vdp = VDP()
+    vdp.regs[1] = 0x40   # display enable
     vdp.regs[5] = 0x7E
     return vdp
 

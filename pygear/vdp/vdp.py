@@ -400,12 +400,16 @@ class VDP:
         line = self._line
 
         if line < ACTIVE_LINES:
-            # Render and composite background + sprite layers
-            bg                          = self.render_line(line)
-            sp_cram, sp_has, ov, collision = render_sprite_line(self.vram, self.regs, line)
-            self._line_buffer[line]     = self._compose_line(bg, sp_cram, sp_has)
-            if ov:        self.status |= 0x40   # sprite overflow
-            if collision: self.status |= 0x20   # sprite collision
+            if self.regs[1] & 0x40:  # display enable (R1 bit 6)
+                bg                             = self.render_line(line)
+                sp_cram, sp_has, ov, collision = render_sprite_line(self.vram, self.regs, line)
+                self._line_buffer[line]        = self._compose_line(bg, sp_cram, sp_has)
+                if ov:        self.status |= 0x40   # sprite overflow
+                if collision: self.status |= 0x20   # sprite collision
+            else:
+                # Display blanked: all pixels show backdrop color (sprite palette, R7[3:0])
+                backdrop = 16 + (self.regs[7] & 0x0F)
+                self._line_buffer[line] = np.full(256, backdrop, dtype=np.uint8)
             # Line interrupt counter (R0 bit 4 enables, R10 is reload value).
             # Decrement first, fire when it goes negative, then reload.
             self._line_irq -= 1
