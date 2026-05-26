@@ -2,23 +2,28 @@
 
 Address map
 -----------
-$0000–$03FF  ROM bank 0 low 1 KB (always fixed)
+$0000–$03FF  ROM bank 0 low 1 KB (always fixed, Sega mapper only)
 $0400–$3FFF  ROM slot 0
 $4000–$7FFF  ROM slot 1
-$8000–$BFFF  ROM slot 2  (or cartridge RAM if mapper enables it)
+$8000–$BFFF  ROM slot 2  (or cartridge RAM if Sega mapper enables it)
 $C000–$DFFF  8 KB main RAM
-$E000–$FFFF  RAM mirror  ($E000–$FFFF mirrors $C000–$DFFF except mapper regs)
-$FFFC–$FFFF  Sega mapper control registers (writes only)
+$E000–$FFFF  RAM mirror  ($E000–$FFFF mirrors $C000–$DFFF)
+$FFFC–$FFFF  Sega mapper control registers (writes only; not used by Codemasters)
+
+Mapper selection is automatic: Codemasters ROMs are identified by their
+checksum header; all others use the standard Sega mapper.
 """
 
 from .ram import RAM
-from .mapper import SegaMapper
+from .mapper import SegaMapper, CodemastersMapper
 
 
 class MemoryBus:
     def __init__(self, cart):
         self.ram = RAM()
-        self.mapper = SegaMapper(cart)
+        self.mapper = (
+            CodemastersMapper(cart) if cart.is_codemasters else SegaMapper(cart)
+        )
 
     # ------------------------------------------------------------------
     def reset(self):
@@ -44,17 +49,18 @@ class MemoryBus:
         value &= 0xFF
 
         if addr < 0x8000:
-            # ROM — only mapper regs inside first 1KB area matter; normally ignored
+            # Codemasters bank registers live here; Sega mapper ignores these writes.
+            self.mapper.write_rom_area(addr, value)
             return
 
         if addr < 0xC000:
-            # Slot 2: write to cartridge RAM if enabled
+            # Slot 2: Codemasters bank register at $8000; Sega cart RAM writes.
             self.mapper.write_slot2(addr, value)
             return
 
         # RAM mirror ($C000–$FFFF)
         self.ram.write(addr & 0x1FFF, value)
 
-        # Mapper control registers live in the top of RAM
+        # Mapper control registers live in the top of RAM (Sega mapper only).
         if addr >= 0xFFFC:
             self.mapper.write_register(addr & 0x03, value)

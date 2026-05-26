@@ -15,6 +15,8 @@ _ROM_SIZE_TABLE = {
     0x12: 1024 * 1024,  # 1 MB
 }
 
+_CODEMASTERS_CHECKSUM_OFFSET = 0x7FE6  # 16-bit LE checksum of bytes 0x0000–0x7FE5
+
 
 class Cartridge:
     def __init__(self, path: str):
@@ -30,6 +32,7 @@ class Cartridge:
         self.bank_count = max(1, self.size // (16 * 1024))
 
         self._parse_header()
+        self.is_codemasters = self._detect_codemasters()
 
     # ------------------------------------------------------------------
     def _parse_header(self):
@@ -54,6 +57,21 @@ class Cartridge:
                 self.region = (self._data[off + 15] >> 4) & 0x0F
                 self.rom_size_byte = self._data[off + 15] & 0x0F
                 break
+
+    def _detect_codemasters(self) -> bool:
+        """Return True if the ROM looks like a Codemasters cartridge.
+
+        Codemasters ROMs have no Sega header and carry a 16-bit checksum of
+        bytes 0x0000–0x7FE5 stored little-endian at 0x7FE6.
+        """
+        if self.header_valid:
+            return False
+        end = _CODEMASTERS_CHECKSUM_OFFSET
+        if len(self._data) < end + 2:
+            return False
+        stored = self._data[end] | (self._data[end + 1] << 8)
+        computed = sum(self._data[:end]) & 0xFFFF
+        return stored == computed
 
     # ------------------------------------------------------------------
     def read(self, bank: int, offset: int) -> int:

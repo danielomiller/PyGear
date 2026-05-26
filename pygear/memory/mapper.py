@@ -1,5 +1,7 @@
-"""Sega bank mapper.
+"""Sega and Codemasters bank mappers.
 
+Sega mapper
+-----------
 Writes to $FFFC–$FFFF control ROM bank selection and cartridge-RAM banking.
 
   $FFFC  — mapper control register (cart-RAM bank + enable bits)
@@ -9,6 +11,16 @@ Writes to $FFFC–$FFFF control ROM bank selection and cartridge-RAM banking.
 
 The first 1 KB of ROM ($0000–$03FF) is always the first 1 KB of bank 0
 regardless of mapper state.
+
+Codemasters mapper
+------------------
+Bank registers are triggered by writes to ROM addresses:
+
+  $0000  — slot 0 bank select ($0000–$3FFF)
+  $4000  — slot 1 bank select ($4000–$7FFF)
+  $8000  — slot 2 bank select ($8000–$BFFF); bit 7 enables on-chip SRAM
+
+All three slots span the full 16 KB (no fixed-1KB region).
 """
 
 _CART_RAM_SIZE = 0x8000  # 32 KB cartridge RAM
@@ -31,6 +43,9 @@ class SegaMapper:
         self._cart_ram_enabled = False
 
     # ------------------------------------------------------------------
+    def write_rom_area(self, addr: int, value: int):
+        """Called for writes to $0000–$7FFF. No-op for the Sega mapper."""
+
     def write_register(self, reg: int, value: int):
         """Called when CPU writes to $FFFC–$FFFF."""
         reg &= 0x03
@@ -71,6 +86,54 @@ class SegaMapper:
             offset = addr & 0x3FFF
             ram_addr = self._cart_ram_bank * 0x4000 + offset
             self._cart_ram[ram_addr % _CART_RAM_SIZE] = value & 0xFF
+
+    @property
+    def slot_banks(self):
+        return tuple(self._slots)
+
+
+# ---------------------------------------------------------------------------
+
+class CodemastersMapper:
+    """Codemasters bank mapper.
+
+    Bank registers are written to ROM addresses $0000, $4000, $8000.
+    All three 16 KB slots are fully switchable (no fixed-1KB region).
+    """
+
+    def __init__(self, cart):
+        self.cart = cart
+        self._slots = [0, 1, 2]
+
+    # ------------------------------------------------------------------
+    def reset(self):
+        self._slots = [0, 1, 2]
+
+    # ------------------------------------------------------------------
+    def write_rom_area(self, addr: int, value: int):
+        """Handle bank register writes at $0000 and $4000."""
+        if addr == 0x0000:
+            self._slots[0] = value % self.cart.bank_count
+        elif addr == 0x4000:
+            self._slots[1] = value % self.cart.bank_count
+
+    def write_register(self, reg: int, value: int):
+        """No mapper control registers in RAM for the Codemasters mapper."""
+
+    # ------------------------------------------------------------------
+    def read(self, addr: int) -> int:
+        slot   = addr >> 14   # 0 or 1
+        offset = addr & 0x3FFF
+        return self.cart.read(self._slots[slot], offset)
+
+    def read_slot2(self, addr: int) -> int:
+        offset = addr & 0x3FFF
+        return self.cart.read(self._slots[2], offset)
+
+    def write_slot2(self, addr: int, value: int):
+        """Bank register at $8000; upper bits reserved for future SRAM support."""
+        if addr == 0x8000:
+            self._slots[2] = value % self.cart.bank_count
 
     @property
     def slot_banks(self):

@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pygear.cartridge import Cartridge
 from pygear.memory.ram import RAM
-from pygear.memory.mapper import SegaMapper
+from pygear.memory.mapper import SegaMapper, CodemastersMapper
 from pygear.memory.bus import MemoryBus
 
 
@@ -570,3 +570,190 @@ class TestMemoryBus:
         bus = MemoryBus(_make_cart(64))
         bus.write(0xC000, 0x1AB)            # only low byte stored
         assert bus.read(0xC000) == 0xAB
+
+
+# ---------------------------------------------------------------------------
+# Codemasters detection helpers
+
+def _make_codemasters_cart(size_kb: int = 128) -> Cartridge:
+    """Build a cartridge that passes the Codemasters checksum check."""
+    size = size_kb * 1024
+    data = bytearray(size)
+    # Fill each 16 KB bank with its bank index
+    for bank in range(size // 0x4000):
+        for offset in range(0x4000):
+            data[bank * 0x4000 + offset] = bank & 0xFF
+    # Compute and store Codemasters checksum at 0x7FE6
+    checksum = sum(data[:0x7FE6]) & 0xFFFF
+    data[0x7FE6] = checksum & 0xFF
+    data[0x7FE7] = (checksum >> 8) & 0xFF
+    tmp = tempfile.NamedTemporaryFile(suffix=".gg", delete=False)
+    tmp.write(data)
+    tmp.close()
+    cart = Cartridge(tmp.name)
+    os.unlink(tmp.name)
+    return cart
+
+
+# ---------------------------------------------------------------------------
+# TestCodemastersDetection
+
+class TestCodemastersDetection:
+
+    def test_codemasters_cart_detected(self):
+        assert _make_codemasters_cart().is_codemasters is True
+
+    def test_sega_cart_not_codemasters(self):
+        assert _make_cart(64).is_codemasters is False
+
+    def test_sega_header_overrides_matching_checksum(self):
+        # If a ROM happens to have a valid CM checksum AND a Sega header,
+        # the Sega header wins.
+        size = 32 * 1024
+        data = bytearray(size)
+        data[0x1FF0:0x1FF8] = b"TMR SEGA"   # valid Sega header
+        checksum = sum(data[:0x7FE6]) & 0xFFFF
+        data[0x7FE6] = checksum & 0xFF
+        data[0x7FE7] = (checksum >> 8) & 0xFF
+        cart = _cart_from_bytes(bytes(data))
+        assert cart.is_codemasters is False
+
+    def test_too_small_rom_not_codemasters(self):
+        # ROM smaller than 0x7FE8 cannot hold the CM checksum.
+        data = bytearray(16 * 1024)
+        cart = _cart_from_bytes(bytes(data))
+        assert cart.is_codemasters is False
+
+    def test_wrong_checksum_not_codemasters(self):
+        size = 128 * 1024
+        data = bytearray(size)
+        data[0x7FE6] = 0xDE
+        data[0x7FE7] = 0xAD   # deliberate mismatch
+        cart = _cart_from_bytes(bytes(data))
+        assert cart.is_codemasters is False
+
+
+# ---------------------------------------------------------------------------
+# TestCodemastersMapper
+
+class TestCodemastersMapper:
+
+    def test_default_slot_banks(self):
+        assert CodemastersMapper(_make_codemasters_cart()).slot_banks == (0, 1, 2)
+
+    def test_slot0_bank_select_via_write_rom_area(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_rom_area(0x0000, 3)
+        assert mapper.slot_banks[0] == 3
+
+    def test_slot1_bank_select_via_write_rom_area(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_rom_area(0x4000, 5)
+        assert mapper.slot_banks[1] == 5
+
+    def test_slot2_bank_select_via_write_slot2(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8000, 7)
+        assert mapper.slot_banks[2] == 7
+
+    def test_slot2_write_ignored_at_non_base_address(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8001, 3)
+        assert mapper.slot_banks[2] == 2   # unchanged
+
+    def test_bank_wraps_at_rom_boundary(self):
+        cart = _make_codemasters_cart(128)   # 8 banks
+        mapper = CodemastersMapper(cart)
+        mapper.write_rom_area(0x0000, 9)    # 9 % 8 = 1
+        assert mapper.slot_banks[0] == 1
+
+    def test_read_slot0_reflects_bank(self):
+        cart = _make_codemasters_cart(128)
+        mapper = CodemastersMapper(cart)
+        mapper.write_rom_area(0x0000, 3)
+        # bank 3 bytes are all 0x03
+        assert mapper.read(0x0000) == 0x03
+
+    def test_read_slot1_reflects_bank(self):
+        cart = _make_codemasters_cart(128)
+        mapper = CodemastersMapper(cart)
+        mapper.write_rom_area(0x4000, 5)
+        assert mapper.read(0x4000) == 0x05
+
+    def test_read_slot2_reflects_bank(self):
+        cart = _make_codemasters_cart(128)
+        mapper = CodemastersMapper(cart)
+        mapper.write_slot2(0x8000, 7)
+        assert mapper.read_slot2(0x8000) == 0x07
+
+    def test_write_rom_area_ignores_non_register_address(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_rom_area(0x0001, 5)   # not a bank register address
+        assert mapper.slot_banks[0] == 0   # unchanged
+
+    def test_reset_restores_defaults(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_rom_area(0x0000, 3)
+        mapper.write_rom_area(0x4000, 4)
+        mapper.write_slot2(0x8000, 5)
+        mapper.reset()
+        assert mapper.slot_banks == (0, 1, 2)
+
+    def test_no_mapper_regs_in_ram(self):
+        # write_register is a no-op — does not raise
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_register(0, 0xFF)
+        mapper.write_register(3, 0xFF)
+        assert mapper.slot_banks == (0, 1, 2)
+
+
+# ---------------------------------------------------------------------------
+# TestMemoryBusCodemasters
+
+class TestMemoryBusCodemasters:
+
+    def test_bus_selects_codemasters_mapper(self):
+        bus = MemoryBus(_make_codemasters_cart())
+        assert isinstance(bus.mapper, CodemastersMapper)
+
+    def test_bus_selects_sega_mapper_for_normal_cart(self):
+        bus = MemoryBus(_make_cart(64))
+        assert isinstance(bus.mapper, SegaMapper)
+
+    def test_slot0_bank_switched_via_write_to_0x0000(self):
+        cart = _make_codemasters_cart(128)
+        bus = MemoryBus(cart)
+        bus.write(0x0000, 3)
+        assert bus.mapper.slot_banks[0] == 3
+        assert bus.read(0x0000) == 0x03
+
+    def test_slot1_bank_switched_via_write_to_0x4000(self):
+        cart = _make_codemasters_cart(128)
+        bus = MemoryBus(cart)
+        bus.write(0x4000, 5)
+        assert bus.mapper.slot_banks[1] == 5
+        assert bus.read(0x4000) == 0x05
+
+    def test_slot2_bank_switched_via_write_to_0x8000(self):
+        cart = _make_codemasters_cart(128)
+        bus = MemoryBus(cart)
+        bus.write(0x8000, 7)
+        assert bus.mapper.slot_banks[2] == 7
+        assert bus.read(0x8000) == 0x07
+
+    def test_ram_still_works(self):
+        bus = MemoryBus(_make_codemasters_cart())
+        bus.write(0xC100, 0x42)
+        assert bus.read(0xC100) == 0x42
+
+    def test_sega_mapper_regs_ignored_for_codemasters(self):
+        bus = MemoryBus(_make_codemasters_cart())
+        bus.write(0xFFFF, 5)   # would switch slot 2 on Sega mapper
+        assert bus.mapper.slot_banks[2] == 2   # unchanged
+
+    def test_reset_restores_codemasters_banks(self):
+        cart = _make_codemasters_cart(128)
+        bus = MemoryBus(cart)
+        bus.write(0x0000, 3)
+        bus.reset()
+        assert bus.mapper.slot_banks == (0, 1, 2)
