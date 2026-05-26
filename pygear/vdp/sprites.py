@@ -39,6 +39,8 @@ Collision
   Detected across all sprites on the line regardless of draw order.
 """
 
+import numpy as np
+
 SPRITE_LIMIT = 8
 
 
@@ -105,12 +107,15 @@ def sprites_on_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
 def render_sprite_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
     """Render all sprites visible on *line*.
 
-    Returns (pixels, overflow, collision).
+    Returns (sp_cram, sp_has, overflow, collision).
 
-    pixels
-      List of 256 (cram_index, has_pixel) tuples.  has_pixel is False for
-      transparent positions (color index 0 or no sprite).  cram_index is
-      in the range 16–31 (palette 1) when has_pixel is True, 0 otherwise.
+    sp_cram
+      numpy uint8 array of length 256.  Each element is the CRAM index
+      (16–31, palette 1) for that screen X position, or 0 if no sprite.
+
+    sp_has
+      numpy bool_ array of length 256.  True where a non-transparent
+      sprite pixel exists.
 
     overflow
       True when more than 8 sprites were visible on this line.
@@ -132,7 +137,8 @@ def render_sprite_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
 
     visible, overflow = sprites_on_line(vram, regs, line)
 
-    pixels    = [(0, False)] * 256
+    sp_cram   = np.zeros(256, dtype=np.uint8)
+    sp_has    = np.zeros(256, dtype=np.bool_)
     collision = False
 
     for x, tile_num, dy in visible:
@@ -170,9 +176,10 @@ def render_sprite_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
             for sx in range(sx0, sx0 + (2 if zoom else 1)):
                 if sx < 0 or sx > 255:
                     continue
-                if pixels[sx][1]:         # another sprite already drew here
+                if sp_has[sx]:            # another sprite already drew here
                     collision = True
                 else:
-                    pixels[sx] = (cram_idx, True)
+                    sp_cram[sx] = cram_idx
+                    sp_has[sx]  = True
 
-    return pixels, overflow, collision
+    return sp_cram, sp_has, overflow, collision

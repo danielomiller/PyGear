@@ -1,7 +1,8 @@
 """Tests for pygear.vdp.sprites and VDP sprite compositing."""
+import numpy as np
 import pytest
 from pygear.vdp.sprites import sat_base, parse_sat, sprites_on_line, render_sprite_line
-from pygear.vdp.vdp import VDP, CYCLES_PER_LINE, ACTIVE_LINES
+from pygear.vdp.vdp import VDP, CYCLES_PER_LINE, ACTIVE_LINES, ScanlineView
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -388,9 +389,9 @@ class TestSpriteLineRenderer:
         vram = make_vram()
         regs = make_regs(r5=0x7E)
         sat_terminate(vram, regs, 0)
-        pixels, ov, col = render_sprite_line(vram, regs, 0)
-        assert len(pixels) == 256
-        assert all(not p[1] for p in pixels)
+        sp_cram, sp_has, ov, col = render_sprite_line(vram, regs, 0)
+        assert len(sp_has) == 256
+        assert not sp_has.any()
         assert ov is False
         assert col is False
 
@@ -399,8 +400,8 @@ class TestSpriteLineRenderer:
         vram = make_vram()
         regs = make_regs(r5=0x7E)
         setup_sprite(vram, regs, 0, 0, 0, 0)    # Y=0 → line 1
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert all(not p[1] for p in pixels)
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert not sp_has.any()
 
     # --- palette 1 cram index mapping --------------------------------------
 
@@ -409,24 +410,24 @@ class TestSpriteLineRenderer:
         regs = make_regs(r5=0x7E)
         write_tile_row(vram, 0, 0, b0=0xFF)    # plane 0 all set → color 1
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert pixels[0] == (17, True)
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_cram[0] == 17 and sp_has[0]
 
     def test_color_15_maps_to_cram_31(self):
         vram = make_vram()
         regs = make_regs(r5=0x7E)
         write_tile_row(vram, 0, 0, b0=0xFF, b1=0xFF, b2=0xFF, b3=0xFF)
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert pixels[0] == (31, True)
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_cram[0] == 31 and sp_has[0]
 
     def test_color_2_maps_to_cram_18(self):
         vram = make_vram()
         regs = make_regs(r5=0x7E)
         write_tile_row(vram, 0, 0, b1=0xFF)    # plane 1 only → color 2
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert pixels[0] == (18, True)
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_cram[0] == 18 and sp_has[0]
 
     # --- X positioning and pixel pattern -----------------------------------
 
@@ -435,19 +436,19 @@ class TestSpriteLineRenderer:
         regs = make_regs(r5=0x7E)
         write_tile_row(vram, 0, 0, b0=0xFF)
         setup_sprite(vram, regs, 0, 0, 10, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert not pixels[9][1]
-        assert all(pixels[x][1] for x in range(10, 18))
-        assert not pixels[18][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert not sp_has[9]
+        assert sp_has[10:18].all()
+        assert not sp_has[18]
 
     def test_sprite_at_x0_covers_pixels_0_to_7(self):
         vram = make_vram()
         regs = make_regs(r5=0x7E)
         write_tile_row(vram, 0, 0, b0=0xFF)
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert all(pixels[x][1] for x in range(8))
-        assert not pixels[8][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_has[0:8].all()
+        assert not sp_has[8]
 
     def test_checkerboard_0xAA_odd_cols_transparent(self):
         # 0xAA = 10101010: bit7,5,3,1 set → cols 0,2,4,6 have color 1
@@ -455,12 +456,12 @@ class TestSpriteLineRenderer:
         regs = make_regs(r5=0x7E)
         write_tile_row(vram, 0, 0, b0=0xAA)
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
         for col in range(8):
             if col % 2 == 0:
-                assert pixels[col][1], f"col {col} should have pixel"
+                assert sp_has[col], f"col {col} should have pixel"
             else:
-                assert not pixels[col][1], f"col {col} should be transparent"
+                assert not sp_has[col], f"col {col} should be transparent"
 
     # --- tile row selection ------------------------------------------------
 
@@ -470,18 +471,18 @@ class TestSpriteLineRenderer:
         regs = make_regs(r5=0x7E)
         write_tile_row(vram, 0, 3, b0=0xFF)    # row 3 has pixels
         setup_sprite(vram, regs, 0, 0, 0, 0)   # Y=0 → line 1+dy
-        pixels, _, _ = render_sprite_line(vram, regs, 4)   # line 4 → dy=3
-        assert pixels[0][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 4)   # line 4 → dy=3
+        assert sp_has[0]
 
     def test_different_dy_uses_different_row(self):
         vram = make_vram()
         regs = make_regs(r5=0x7E)
         write_tile_row(vram, 0, 2, b0=0xFF)    # only row 2 has data
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pix_row1, _, _ = render_sprite_line(vram, regs, 2)   # dy=1 → row 1
-        pix_row3, _, _ = render_sprite_line(vram, regs, 3)   # dy=2 → row 2
-        assert not pix_row1[0][1]
-        assert pix_row3[0][1]
+        _, has_row1, _, _ = render_sprite_line(vram, regs, 2)   # dy=1 → row 1
+        _, has_row2, _, _ = render_sprite_line(vram, regs, 3)   # dy=2 → row 2
+        assert not has_row1[0]
+        assert has_row2[0]
 
     # --- tile pattern base (R6) --------------------------------------------
 
@@ -490,16 +491,16 @@ class TestSpriteLineRenderer:
         regs = make_regs(r5=0x7E, r6=0x00)
         write_tile_row(vram, 0, 0, b0=0xFF, tile_base=0x0000)
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert pixels[0][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_has[0]
 
     def test_tile_base_r6_4_reads_from_0x2000(self):
         vram = make_vram()
         regs = make_regs(r5=0x7E, r6=0x04)
         write_tile_row(vram, 0, 0, b0=0xFF, tile_base=0x2000)
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert pixels[0][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_has[0]
 
     def test_tile_base_r6_4_ignores_0x0000(self):
         # Data at 0x0000 should NOT be used when R6 selects 0x2000
@@ -507,8 +508,8 @@ class TestSpriteLineRenderer:
         regs = make_regs(r5=0x7E, r6=0x04)
         write_tile_row(vram, 0, 0, b0=0xFF, tile_base=0x0000)  # wrong base
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert not pixels[0][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert not sp_has[0]
 
     # --- tall mode tile selection -------------------------------------------
 
@@ -519,8 +520,8 @@ class TestSpriteLineRenderer:
         write_tile_row(vram, 2, 0, b0=0xFF)   # upper tile has data
         write_tile_row(vram, 3, 0, b0=0x00)   # lower tile is transparent
         setup_sprite(vram, regs, 0, 0, 0, 2)  # tile 2 (even)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)   # dy=0
-        assert pixels[0][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)   # dy=0
+        assert sp_has[0]
 
     def test_tall_lower_tile_used_for_dy_ge_8(self):
         # Tall: dy=8 → actual_row=8 ≥ 8 → use tile 3 (2|1), row 0
@@ -529,8 +530,8 @@ class TestSpriteLineRenderer:
         write_tile_row(vram, 2, 0, b0=0x00)   # upper transparent
         write_tile_row(vram, 3, 0, b0=0xFF)   # lower has data
         setup_sprite(vram, regs, 0, 0, 0, 2)
-        pixels, _, _ = render_sprite_line(vram, regs, 9)   # dy=8
-        assert pixels[0][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 9)   # dy=8
+        assert sp_has[0]
 
     def test_tall_lower_tile_row_7_for_dy_15(self):
         # dy=15 → actual_row=15 ≥ 8 → lower tile, row 15-8=7
@@ -538,8 +539,8 @@ class TestSpriteLineRenderer:
         regs = make_regs(r5=0x7E, r1=0x02)
         write_tile_row(vram, 3, 7, b0=0xFF)   # lower tile row 7
         setup_sprite(vram, regs, 0, 0, 0, 2)
-        pixels, _, _ = render_sprite_line(vram, regs, 16)  # dy=15
-        assert pixels[0][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 16)  # dy=15
+        assert sp_has[0]
 
     # --- zoom mode ---------------------------------------------------------
 
@@ -549,10 +550,10 @@ class TestSpriteLineRenderer:
         regs = make_regs(r5=0x7E, r1=0x01)
         write_tile_row(vram, 0, 0, b0=0x80)   # only bit 7 (col 0) set
         setup_sprite(vram, regs, 0, 0, 10, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert pixels[10][1]
-        assert pixels[11][1]
-        assert not pixels[12][1]
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_has[10]
+        assert sp_has[11]
+        assert not sp_has[12]
 
     def test_zoom_dy_1_uses_same_row_as_dy_0(self):
         # zoom: actual_row = dy>>1; dy=0 and dy=1 both map to row 0
@@ -561,10 +562,10 @@ class TestSpriteLineRenderer:
         write_tile_row(vram, 0, 0, b0=0xFF)   # row 0 has data
         write_tile_row(vram, 0, 1, b0=0x00)   # row 1 empty
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pix_dy0, _, _ = render_sprite_line(vram, regs, 1)  # dy=0
-        pix_dy1, _, _ = render_sprite_line(vram, regs, 2)  # dy=1
-        assert pix_dy0[0][1]
-        assert pix_dy1[0][1]   # same row 0, still has pixel
+        _, has_dy0, _, _ = render_sprite_line(vram, regs, 1)  # dy=0
+        _, has_dy1, _, _ = render_sprite_line(vram, regs, 2)  # dy=1
+        assert has_dy0[0]
+        assert has_dy1[0]   # same row 0, still has pixel
 
     def test_zoom_dy_2_uses_row_1(self):
         vram = make_vram()
@@ -572,8 +573,8 @@ class TestSpriteLineRenderer:
         write_tile_row(vram, 0, 0, b0=0xFF)   # row 0 has data
         write_tile_row(vram, 0, 1, b0=0x00)   # row 1 empty
         setup_sprite(vram, regs, 0, 0, 0, 0)
-        pix_dy2, _, _ = render_sprite_line(vram, regs, 3)  # dy=2 → row 1
-        assert not pix_dy2[0][1]
+        _, has_dy2, _, _ = render_sprite_line(vram, regs, 3)  # dy=2 → row 1
+        assert not has_dy2[0]
 
     # --- right-edge clipping -----------------------------------------------
 
@@ -584,9 +585,9 @@ class TestSpriteLineRenderer:
         regs = make_regs(r5=0x7E)
         write_tile_row(vram, 0, 0, b0=0xFF)
         setup_sprite(vram, regs, 0, 0, 252, 0)
-        pixels, _, _ = render_sprite_line(vram, regs, 1)
-        assert all(pixels[x][1] for x in range(252, 256))
-        assert sum(p[1] for p in pixels) == 4
+        sp_cram, sp_has, _, _ = render_sprite_line(vram, regs, 1)
+        assert sp_has[252:256].all()
+        assert int(sp_has.sum()) == 4
 
     # --- sprite priority ---------------------------------------------------
 
@@ -600,8 +601,8 @@ class TestSpriteLineRenderer:
         sat_write(vram, regs, 0, 0, 0, 0)
         sat_write(vram, regs, 1, 0, 0, 1)
         sat_terminate(vram, regs, 2)
-        pixels, _, collision = render_sprite_line(vram, regs, 1)
-        assert pixels[0][0] == 17
+        sp_cram, sp_has, _, collision = render_sprite_line(vram, regs, 1)
+        assert sp_cram[0] == 17
         assert collision is True
 
     # --- collision detection -----------------------------------------------
@@ -613,7 +614,7 @@ class TestSpriteLineRenderer:
         sat_write(vram, regs, 0, 0, 0, 0)   # X=0, covers 0-7
         sat_write(vram, regs, 1, 0, 4, 0)   # X=4, covers 4-11 → overlap 4-7
         sat_terminate(vram, regs, 2)
-        _, _, collision = render_sprite_line(vram, regs, 1)
+        _, _, _, collision = render_sprite_line(vram, regs, 1)
         assert collision is True
 
     def test_no_collision_non_overlapping_sprites(self):
@@ -623,7 +624,7 @@ class TestSpriteLineRenderer:
         sat_write(vram, regs, 0, 0,  0, 0)  # X=0,  pixels 0-7
         sat_write(vram, regs, 1, 0, 16, 0)  # X=16, pixels 16-23
         sat_terminate(vram, regs, 2)
-        _, _, collision = render_sprite_line(vram, regs, 1)
+        _, _, _, collision = render_sprite_line(vram, regs, 1)
         assert collision is False
 
     def test_no_collision_when_overlap_is_transparent(self):
@@ -634,7 +635,7 @@ class TestSpriteLineRenderer:
         sat_write(vram, regs, 0, 0, 0, 0)
         sat_write(vram, regs, 1, 0, 0, 0)
         sat_terminate(vram, regs, 2)
-        _, _, collision = render_sprite_line(vram, regs, 1)
+        _, _, _, collision = render_sprite_line(vram, regs, 1)
         assert collision is False
 
     # --- overflow forwarded ------------------------------------------------
@@ -645,7 +646,7 @@ class TestSpriteLineRenderer:
         for n in range(9):
             sat_write(vram, regs, n, 0, n * 8, 0)
         sat_terminate(vram, regs, 9)
-        _, overflow, _ = render_sprite_line(vram, regs, 1)
+        _, _, overflow, _ = render_sprite_line(vram, regs, 1)
         assert overflow is True
 
 
@@ -659,6 +660,20 @@ def bg_px(cram_idx, priority=False):
 
 def sp_px(cram_idx=0, has_pixel=False):
     return (cram_idx, has_pixel)
+
+def to_sv(bg_list):
+    """Convert list of (cram_idx, priority) tuples to ScanlineView."""
+    return ScanlineView(
+        np.array([t[0] for t in bg_list], dtype=np.uint8),
+        np.array([t[1] for t in bg_list], dtype=np.bool_),
+    )
+
+def to_sp(sp_list):
+    """Convert list of (cram_idx, has_pixel) tuples to (sp_cram, sp_has) arrays."""
+    return (
+        np.array([t[0] for t in sp_list], dtype=np.uint8),
+        np.array([t[1] for t in sp_list], dtype=np.bool_),
+    )
 
 # VDP helpers for status-bit tests
 _COMP_SAT = 0x3F00   # R5=0x7E → (0x7E & 0x7E) << 7 = 0x3F00
@@ -687,61 +702,61 @@ class TestComposition:
 
     def test_sprite_wins_over_non_priority_bg(self):
         vdp = VDP()
-        bg = [bg_px(1, False)] * 256
-        sp = [sp_px(17, True)]  * 256
-        result = vdp._compose_line(bg, sp)
+        bg = to_sv([bg_px(1, False)] * 256)
+        sp_cram, sp_has = to_sp([sp_px(17, True)] * 256)
+        result = vdp._compose_line(bg, sp_cram, sp_has)
         assert result[0] == 17
 
     def test_priority_bg_opaque_hides_sprite(self):
         vdp = VDP()
         # bg_cram=1, priority=True, 1%16=1 (opaque) → bg wins
-        bg = [bg_px(1, True)]  * 256
-        sp = [sp_px(17, True)] * 256
-        result = vdp._compose_line(bg, sp)
+        bg = to_sv([bg_px(1, True)] * 256)
+        sp_cram, sp_has = to_sp([sp_px(17, True)] * 256)
+        result = vdp._compose_line(bg, sp_cram, sp_has)
         assert result[0] == 1
 
     def test_priority_bg_palette0_color0_shows_sprite(self):
         # bg_cram=0 → 0%16=0 (transparent) → sprite wins despite priority
         vdp = VDP()
-        bg = [bg_px(0, True)]  * 256
-        sp = [sp_px(17, True)] * 256
-        result = vdp._compose_line(bg, sp)
+        bg = to_sv([bg_px(0, True)] * 256)
+        sp_cram, sp_has = to_sp([sp_px(17, True)] * 256)
+        result = vdp._compose_line(bg, sp_cram, sp_has)
         assert result[0] == 17
 
     def test_priority_bg_palette1_color0_shows_sprite(self):
         # bg_cram=16 → 16%16=0 (palette 1 color 0) → still transparent → sprite wins
         vdp = VDP()
-        bg = [bg_px(16, True)] * 256
-        sp = [sp_px(17, True)] * 256
-        result = vdp._compose_line(bg, sp)
+        bg = to_sv([bg_px(16, True)] * 256)
+        sp_cram, sp_has = to_sp([sp_px(17, True)] * 256)
+        result = vdp._compose_line(bg, sp_cram, sp_has)
         assert result[0] == 17
 
     def test_no_sprite_pixel_shows_bg(self):
         vdp = VDP()
-        bg = [bg_px(5, False)] * 256
-        sp = [sp_px(0, False)] * 256
-        result = vdp._compose_line(bg, sp)
+        bg = to_sv([bg_px(5, False)] * 256)
+        sp_cram, sp_has = to_sp([sp_px(0, False)] * 256)
+        result = vdp._compose_line(bg, sp_cram, sp_has)
         assert result[0] == 5
 
     def test_no_sprite_pixel_shows_bg_even_with_priority(self):
         vdp = VDP()
-        bg = [bg_px(3, True)]  * 256
-        sp = [sp_px(17, False)] * 256
-        result = vdp._compose_line(bg, sp)
+        bg = to_sv([bg_px(3, True)] * 256)
+        sp_cram, sp_has = to_sp([sp_px(17, False)] * 256)
+        result = vdp._compose_line(bg, sp_cram, sp_has)
         assert result[0] == 3
 
     def test_output_length_is_256(self):
         vdp = VDP()
-        bg = [bg_px(1, False)] * 256
-        sp = [sp_px(17, True)] * 256
-        assert len(vdp._compose_line(bg, sp)) == 256
+        bg = to_sv([bg_px(1, False)] * 256)
+        sp_cram, sp_has = to_sp([sp_px(17, True)] * 256)
+        assert len(vdp._compose_line(bg, sp_cram, sp_has)) == 256
 
     def test_mixed_all_four_cases(self):
         # Per-pixel: sprite/no-prio-bg, sprite/prio-bg/transparent, bg/prio-bg/opaque, bg/no-sprite
         vdp = VDP()
-        bg = [bg_px(1, False), bg_px(0, True), bg_px(2, True), bg_px(4, False)]
-        sp = [sp_px(17, True), sp_px(18, True), sp_px(19, True), sp_px(0, False)]
-        result = vdp._compose_line(bg, sp)
+        bg = to_sv([bg_px(1, False), bg_px(0, True), bg_px(2, True), bg_px(4, False)] + [bg_px(0, False)] * 252)
+        sp_cram, sp_has = to_sp([sp_px(17, True), sp_px(18, True), sp_px(19, True), sp_px(0, False)] + [sp_px(0, False)] * 252)
+        result = vdp._compose_line(bg, sp_cram, sp_has)
         assert result[0] == 17   # sprite over non-priority bg
         assert result[1] == 18   # sprite wins: priority bg but transparent (0%16=0)
         assert result[2] == 2    # bg wins: priority + opaque (2%16=2)
@@ -749,17 +764,17 @@ class TestComposition:
 
     def test_bg_cram_values_preserved_in_output(self):
         vdp = VDP()
-        bg = [bg_px(n, False) for n in range(256)]
-        sp = [sp_px(0, False)] * 256
-        result = vdp._compose_line(bg, sp)
-        assert result == list(range(256))
+        bg = to_sv([bg_px(n, False) for n in range(256)])
+        sp_cram, sp_has = to_sp([sp_px(0, False)] * 256)
+        result = vdp._compose_line(bg, sp_cram, sp_has)
+        assert list(result) == list(range(256))
 
     def test_sprite_cram_values_preserved_in_output(self):
         vdp = VDP()
-        bg = [bg_px(0, False)] * 256
-        sp = [sp_px(n % 16 + 16, True) for n in range(256)]
-        result = vdp._compose_line(bg, sp)
-        assert result == [n % 16 + 16 for n in range(256)]
+        bg = to_sv([bg_px(0, False)] * 256)
+        sp_cram, sp_has = to_sp([sp_px(n % 16 + 16, True) for n in range(256)])
+        result = vdp._compose_line(bg, sp_cram, sp_has)
+        assert list(result) == [n % 16 + 16 for n in range(256)]
 
     # --- VDP status bits via step() ----------------------------------------
 

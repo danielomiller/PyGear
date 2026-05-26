@@ -1388,7 +1388,7 @@ class TestVDPTiming:
         vdp = make_timing_vdp()
         step_lines(vdp, ACTIVE_LINES)
         px = vdp.frame[0][0]
-        assert isinstance(px, tuple) and len(px) == 3
+        assert len(px) == 3
 
     def test_frame_crop_x_left_edge(self):
         # frame[0][0] = internal pixel (CROP_X=48, CROP_Y=24)
@@ -1398,7 +1398,7 @@ class TestVDPTiming:
         write_solid_tile(vdp, 1, color=1)
         write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=1)
         step_lines(vdp, ACTIVE_LINES)
-        assert vdp.frame[0][0] == (255, 0, 0)
+        assert tuple(vdp.frame[0][0]) == (255, 0, 0)
 
     def test_frame_crop_y_top_edge(self):
         # Internal row CROP_Y maps to frame row 0
@@ -1408,7 +1408,7 @@ class TestVDPTiming:
         write_solid_tile(vdp, 2, color=2)
         write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=2)
         step_lines(vdp, ACTIVE_LINES)
-        assert vdp.frame[0][0] == (0, 255, 0)
+        assert tuple(vdp.frame[0][0]) == (0, 255, 0)
 
     def test_frame_crop_right_edge(self):
         # frame[0][SCREEN_W-1] = internal pixel (CROP_X+159=207, CROP_Y=24)
@@ -1419,7 +1419,7 @@ class TestVDPTiming:
         right_tile_col = (CROP_X + SCREEN_W - 1) // 8   # = 25
         write_name_entry(vdp, CROP_Y // 8, right_tile_col, tile_num=3)
         step_lines(vdp, ACTIVE_LINES)
-        assert vdp.frame[0][SCREEN_W - 1] == (0, 0, 255)
+        assert tuple(vdp.frame[0][SCREEN_W - 1]) == (0, 0, 255)
 
     def test_frame_crop_bottom_edge(self):
         # Internal row CROP_Y + SCREEN_H - 1 = 167 → tile row 20, pixel row 7
@@ -1429,7 +1429,7 @@ class TestVDPTiming:
         bottom_tile_row = (CROP_Y + SCREEN_H - 1) // 8  # = 20
         write_name_entry(vdp, bottom_tile_row, CROP_X // 8, tile_num=4)
         step_lines(vdp, ACTIVE_LINES)
-        assert vdp.frame[SCREEN_H - 1][0] == (255, 255, 0)   # color=4 → CRAM 4 = 0xF,0xF,0
+        assert tuple(vdp.frame[SCREEN_H - 1][0]) == (255, 255, 0)   # color=4 → CRAM 4 = 0xF,0xF,0
 
     def test_frame_ready_not_cleared_by_vdp(self):
         # VDP sets frame_ready; caller is responsible for clearing it
@@ -1544,13 +1544,13 @@ class TestVDPTiming:
         write_cram_color(vdp, 1, r4=0xF, g4=0, b4=0)    # red
         step_lines(vdp, ACTIVE_LINES)
         frame1_pixel = vdp.frame[0][0]
-        assert frame1_pixel == (255, 0, 0)
+        assert tuple(frame1_pixel) == (255, 0, 0)
 
         # Change colour and render a second frame
         vdp.frame_ready = False
         write_cram_color(vdp, 1, r4=0, g4=0, b4=0xF)    # blue
         step_lines(vdp, TOTAL_LINES)
-        assert vdp.frame[0][0] == (0, 0, 255)
+        assert tuple(vdp.frame[0][0]) == (0, 0, 255)
 
     def test_second_frame_reflects_vram_changes(self):
         # Change the tile referenced by the name table between frames
@@ -1561,12 +1561,12 @@ class TestVDPTiming:
         write_solid_tile(vdp, 1, color=1)       # colour 1 = red
         write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=1)
         step_lines(vdp, ACTIVE_LINES)
-        assert vdp.frame[0][0] == (255, 0, 0)
+        assert tuple(vdp.frame[0][0]) == (255, 0, 0)
 
         vdp.frame_ready = False
         write_solid_tile(vdp, 1, color=2)       # colour 2 = green (same tile slot)
         step_lines(vdp, TOTAL_LINES)
-        assert vdp.frame[0][0] == (0, 255, 0)
+        assert tuple(vdp.frame[0][0]) == (0, 255, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -1594,7 +1594,7 @@ class TestIntegration:
 
         assert vdp.frame_ready
         assert cpu.interrupt_count == 1             # VBlank interrupt fired
-        assert vdp.frame[0][0] == (255, 0x8 * 17, 0)
+        assert tuple(vdp.frame[0][0]) == (255, 0x8 * 17, 0)
 
     def test_full_pipeline_all_crop_corners(self):
         # Place a distinct colour at each corner of the 160×144 crop window
@@ -1622,10 +1622,10 @@ class TestIntegration:
 
         step_lines(vdp, ACTIVE_LINES)
 
-        assert vdp.frame[0][0]                    == (255, 0, 0)    # TL red
-        assert vdp.frame[0][SCREEN_W - 1]         == (0, 255, 0)    # TR green
-        assert vdp.frame[SCREEN_H - 1][0]         == (0, 0, 255)    # BL blue
-        assert vdp.frame[SCREEN_H - 1][SCREEN_W - 1] == (255, 255, 0)  # BR yellow
+        assert tuple(vdp.frame[0][0])                    == (255, 0, 0)    # TL red
+        assert tuple(vdp.frame[0][SCREEN_W - 1])         == (0, 255, 0)    # TR green
+        assert tuple(vdp.frame[SCREEN_H - 1][0])         == (0, 0, 255)    # BL blue
+        assert tuple(vdp.frame[SCREEN_H - 1][SCREEN_W - 1]) == (255, 255, 0)  # BR yellow
 
     def test_port_write_vram_then_render(self):
         # Write a tile to VRAM via the port interface (not direct array access),
@@ -1650,4 +1650,4 @@ class TestIntegration:
 
         write_name_entry(vdp, CROP_Y // 8, CROP_X // 8, tile_num=0, palette=0)
         step_lines(vdp, ACTIVE_LINES)
-        assert vdp.frame[0][0] == (0, 0, 255)   # CRAM 3 = blue
+        assert tuple(vdp.frame[0][0]) == (0, 0, 255)   # CRAM 3 = blue

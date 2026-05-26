@@ -33,11 +33,46 @@ Timing
 Active display: lines 0–191.  VBlank: lines 192–261.
 """
 
+import numpy as np
+
 from .sprites import render_sprite_line
 
 VRAM_SIZE = 0x4000   # 16 KB
 CRAM_SIZE = 64       # 32 colours × 2 bytes
 NUM_REGS  = 11       # R0–R10
+
+
+class ScanlineView:
+    """Read-only view of a rendered background scanline.
+
+    Wraps two numpy arrays (cram_indices and priority flags) and exposes a
+    sequence interface compatible with the test suite:
+
+      line[i]        → (int(cram_idx), bool(priority))
+      line[a:b]      → list of (int, bool) tuples
+      len(line)      → 256
+      for px in line → yields (int, bool) tuples
+
+    Internally used by _compose_line() which extracts the raw arrays.
+    """
+    __slots__ = ("_cram", "_pri")
+
+    def __init__(self, cram: np.ndarray, pri: np.ndarray):
+        self._cram = cram   # uint8[256]
+        self._pri  = pri    # bool_[256]
+
+    def __len__(self):
+        return 256
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            indices = range(*idx.indices(256))
+            return [(int(self._cram[i]), bool(self._pri[i])) for i in indices]
+        return (int(self._cram[idx]), bool(self._pri[idx]))
+
+    def __iter__(self):
+        for i in range(256):
+            yield (int(self._cram[i]), bool(self._pri[i]))
 
 # NTSC timing
 CYCLES_PER_LINE = 228
@@ -189,12 +224,15 @@ class VDP:
     # ------------------------------------------------------------------
     # Background scanline renderer
     # ------------------------------------------------------------------
-    def render_line(self, line: int) -> list:
+    def render_line(self, line: int) -> "ScanlineView":
         """Render 256 pixels of the background layer for *line*.
 
-        Returns a list of 256 (cram_index, priority) tuples.
-        cram_index is 0–31 (colour index 0–15 plus palette offset 0 or 16).
-        priority is True when the name-table entry has bit 12 set.
+        Returns a ScanlineView wrapping two numpy arrays:
+          cram_indices: uint8[256]  — CRAM index 0–31 per pixel
+          priority:     bool_[256] — True when the name-table entry has bit 12 set
+
+        The ScanlineView supports sequence indexing so callers can still do
+        ``line[i]`` → ``(cram_index, priority)`` tuples as before.
 
         Name table
         ----------
@@ -217,8 +255,8 @@ class VDP:
         bit 7  V-scroll lock: right 8 columns (screen_x >= 248) ignore R9
         """
         r0        = self.regs[0]
-        h_scroll  = self.regs[8]
-        v_scroll  = self.regs[9]
+        h_scroll  = int(self.regs[8])
+        v_scroll  = int(self.regs[9])
         name_base = (self.regs[2] & 0x0E) << 10
 
         hscroll_lock = bool(r0 & 0x40)
@@ -232,73 +270,93 @@ class VDP:
         pixel_row = bg_y & 7
 
         # Unscrolled vertical position (used by V-scroll-locked columns)
-        ly_lock     = line % 224
-        tile_row_l  = ly_lock >> 3
-        prow_l      = ly_lock & 7
+        ly_lock    = line % 224
+        tile_row_l = ly_lock >> 3
+        prow_l     = ly_lock & 7
 
-        vram   = self.vram
-        result = []
+        # Zero-copy view of VRAM as a read-only numpy array
+        vram_np = np.frombuffer(self.vram, dtype=np.uint8)
 
-        for screen_x in range(256):
-            if vscroll_lock and screen_x >= 248:
-                tr = tile_row_l
-                pr = prow_l
-            else:
-                tr = tile_row
-                pr = pixel_row
+        # Per-pixel screen x coordinates
+        screen_x = np.arange(256, dtype=np.int32)
 
-            bg_x      = (screen_x + eff_h) & 0xFF
-            tile_col  = bg_x >> 3
-            pixel_col = bg_x & 7
+        # Apply V-scroll lock: right 8 columns (screen_x >= 248) ignore V-scroll
+        if vscroll_lock:
+            tr = np.where(screen_x >= 248, tile_row_l, tile_row).astype(np.int32)
+            pr = np.where(screen_x >= 248, prow_l,     pixel_row).astype(np.int32)
+        else:
+            tr = np.full(256, tile_row,  dtype=np.int32)
+            pr = np.full(256, pixel_row, dtype=np.int32)
 
-            # Read 2-byte name-table entry (little-endian)
-            nt_off = name_base + (tr * 32 + tile_col) * 2
-            lo     = vram[nt_off       & 0x3FFF]
-            hi     = vram[(nt_off + 1) & 0x3FFF]
-            entry  = lo | (hi << 8)
+        # Horizontal scroll
+        bg_x      = (screen_x + eff_h) & 0xFF
+        tile_col  = (bg_x >> 3).astype(np.int32)
+        pixel_col = (bg_x & 7).astype(np.int32)
 
-            tile_num = entry & 0x1FF
-            hflip    = bool(entry & 0x0200)
-            vflip    = bool(entry & 0x0400)
-            palette  = (entry >> 11) & 1
-            priority = bool(entry & 0x1000)
+        # Name-table entry addresses
+        nt_off = (name_base + (tr * 32 + tile_col) * 2).astype(np.int32)
+        lo     = vram_np[ nt_off      & 0x3FFF].astype(np.uint16)
+        hi     = vram_np[(nt_off + 1) & 0x3FFF].astype(np.uint16)
+        entry  = lo | (hi << 8)
 
-            # Pixel row and column inside tile (apply flips)
-            row   = (7 - pr)        if vflip else pr
-            col   = (7 - pixel_col) if hflip else pixel_col
-            shift = 7 - col
-            base  = tile_num * 32 + row * 4
+        # Decode entry fields
+        tile_num = (entry & 0x1FF).astype(np.int32)
+        hflip    = ((entry >> 9)  & 1).astype(np.bool_)
+        vflip    = ((entry >> 10) & 1).astype(np.bool_)
+        palette  = ((entry >> 11) & 1).astype(np.int32)
+        priority = ((entry >> 12) & 1).astype(np.bool_)
 
-            color_idx = (
-                 ((vram[base    ] >> shift) & 1)
-                | ((vram[base + 1] >> shift) & 1) << 1
-                | ((vram[base + 2] >> shift) & 1) << 2
-                | ((vram[base + 3] >> shift) & 1) << 3
-            )
+        # Apply flips to row/column within tile
+        row = np.where(vflip, 7 - pr,        pr).astype(np.int32)
+        col = np.where(hflip, 7 - pixel_col, pixel_col).astype(np.int32)
 
-            result.append((color_idx + palette * 16, priority))
+        shift = (7 - col).astype(np.int32)
 
-        return result
+        # Base address of the 4-byte bitplane row in VRAM
+        base = (tile_num * 32 + row * 4).astype(np.int32)
+
+        # Read the four bitplanes
+        p0 = vram_np[ base      & 0x3FFF].astype(np.uint8)
+        p1 = vram_np[(base + 1) & 0x3FFF].astype(np.uint8)
+        p2 = vram_np[(base + 2) & 0x3FFF].astype(np.uint8)
+        p3 = vram_np[(base + 3) & 0x3FFF].astype(np.uint8)
+
+        # Extract colour bit from each plane and combine into 4-bit index
+        color_idx = (
+            ((p0 >> shift) & 1)
+            | (((p1 >> shift) & 1) << 1)
+            | (((p2 >> shift) & 1) << 2)
+            | (((p3 >> shift) & 1) << 3)
+        ).astype(np.uint8)
+
+        # Apply palette offset (0 or 16)
+        cram_idx = (color_idx + (palette * 16).astype(np.uint8)).astype(np.uint8)
+
+        return ScanlineView(cram_idx, priority)
 
     # ------------------------------------------------------------------
     # Sprite + background compositing
     # ------------------------------------------------------------------
-    def _compose_line(self, bg: list, sprite_pixels: list) -> list:
-        """Merge background and sprite layers into a 256-element cram_index list.
+    def _compose_line(self, bg: "ScanlineView",
+                      sp_cram: np.ndarray, sp_has: np.ndarray) -> np.ndarray:
+        """Merge background and sprite layers into a 256-element cram_index array.
 
         Compositing rule per pixel:
           Sprite wins when it has a non-transparent pixel AND the background
           tile either has no priority flag OR its own color index % 16 == 0
           (i.e. the background pixel is itself transparent / palette color 0).
           Otherwise the background pixel is used.
+
+        Parameters
+        ----------
+        bg      : ScanlineView returned by render_line()
+        sp_cram : uint8[256] sprite CRAM indices from render_sprite_line()
+        sp_has  : bool_[256] sprite pixel presence mask
         """
-        composed = []
-        for (bg_cram, bg_priority), (sp_cram, sp_has_pixel) in zip(bg, sprite_pixels):
-            if sp_has_pixel and (not bg_priority or bg_cram % 16 == 0):
-                composed.append(sp_cram)
-            else:
-                composed.append(bg_cram)
-        return composed
+        bg_cram = bg._cram   # uint8[256]
+        bg_pri  = bg._pri    # bool_[256]
+        use_sprite = sp_has & (~bg_pri | (bg_cram % 16 == 0))
+        return np.where(use_sprite, sp_cram, bg_cram).astype(np.uint8)
 
     # ------------------------------------------------------------------
     # CRAM colour decode
@@ -343,9 +401,9 @@ class VDP:
 
         if line < ACTIVE_LINES:
             # Render and composite background + sprite layers
-            bg                       = self.render_line(line)
-            sp_pixels, ov, collision = render_sprite_line(self.vram, self.regs, line)
-            self._line_buffer[line]  = self._compose_line(bg, sp_pixels)
+            bg                          = self.render_line(line)
+            sp_cram, sp_has, ov, collision = render_sprite_line(self.vram, self.regs, line)
+            self._line_buffer[line]     = self._compose_line(bg, sp_cram, sp_has)
             if ov:        self.status |= 0x40   # sprite overflow
             if collision: self.status |= 0x20   # sprite collision
             # Line interrupt counter (R0 bit 4 enables, R10 is reload value).
@@ -372,12 +430,25 @@ class VDP:
 
     def _assemble_frame(self) -> None:
         """Crop the 256×192 line buffer to the 160×144 Game Gear display."""
-        frame = []
-        for row in range(SCREEN_H):
-            src_row = self._line_buffer[row + CROP_Y]
-            frame_row = []
-            for col in range(SCREEN_W):
-                frame_row.append(self.cram_color(src_row[col + CROP_X]))
-            frame.append(frame_row)
-        self.frame       = frame
+        # Build a CRAM lookup table from current CRAM contents.
+        # CRAM is 64 bytes: 32 colours × 2 bytes (little-endian 12-bit BGR).
+        cram_np = np.frombuffer(self.cram, dtype=np.uint8)
+        lo   = cram_np[0::2].astype(np.uint16)   # 32 low bytes
+        hi   = cram_np[1::2].astype(np.uint16)   # 32 high bytes
+        word = lo | (hi << 8)
+        r = ((word >> 0) & 0xF) * 17
+        g = ((word >> 4) & 0xF) * 17
+        b = ((word >> 8) & 0xF) * 17
+        cram_table = np.stack([r, g, b], axis=1).astype(np.uint8)  # (32, 3)
+
+        # Stack line buffers: each element is uint8[256]; result is (192, 256)
+        buf = np.stack(self._line_buffer)   # (192, 256)
+
+        # Crop to (144, 160) Game Gear window
+        cropped = buf[CROP_Y:CROP_Y + SCREEN_H, CROP_X:CROP_X + SCREEN_W]  # (144, 160)
+
+        # CRAM index → RGB lookup: (144, 160) → (144, 160, 3)
+        frame_arr = cram_table[cropped]  # numpy fancy indexing
+
+        self.frame       = frame_arr
         self.frame_ready = True

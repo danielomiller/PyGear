@@ -30,9 +30,9 @@ KEY_MAP = {
 }
 
 
-def frame_to_surface(frame: list, scale: int) -> pygame.Surface:
-    """Convert a 144×160 list-of-(R,G,B) frame to a scaled pygame Surface."""
-    arr  = np.array(frame, dtype=np.uint8)                  # (144, 160, 3)
+def frame_to_surface(frame, scale: int) -> pygame.Surface:
+    """Convert a 144×160 numpy RGB array (or list-of-RGB) frame to a scaled pygame Surface."""
+    arr  = np.asarray(frame, dtype=np.uint8)                # (144, 160, 3)
     surf = pygame.surfarray.make_surface(arr.transpose(1, 0, 2))  # (160, 144)
     if scale != 1:
         surf = pygame.transform.scale(surf, (SCREEN_W * scale, SCREEN_H * scale))
