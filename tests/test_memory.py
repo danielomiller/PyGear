@@ -804,6 +804,113 @@ class TestCodemastersMapper:
         mapper.write_register(3, 0xFF)
         assert mapper.slot_banks == (0, 1, 2)
 
+    # --- on-chip SRAM ---------------------------------------------------
+
+    def test_sram_disabled_by_default(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        assert mapper._sram_enabled is False
+
+    def test_write_0x8000_bit7_enables_sram(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8000, 0x80)   # bit 7 set, bank 0
+        assert mapper._sram_enabled is True
+
+    def test_write_0x8000_bit7_clear_disables_sram(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8000, 0x80)
+        mapper.write_slot2(0x8000, 0x00)   # bit 7 clear
+        assert mapper._sram_enabled is False
+
+    def test_write_0x8000_sets_slot2_bank_from_low_bits(self):
+        cart = _make_codemasters_cart(128)   # 8 banks
+        mapper = CodemastersMapper(cart)
+        mapper.write_slot2(0x8000, 0x85)   # bit 7 + bank 5
+        assert mapper.slot_banks[2] == 5
+        assert mapper._sram_enabled is True
+
+    def test_sram_read_after_write(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8000, 0x80)   # enable SRAM
+        mapper.write_slot2(0x8010, 0xAB)
+        assert mapper.read_slot2(0x8010) == 0xAB
+
+    def test_sram_read_without_enable_returns_rom(self):
+        cart = _make_codemasters_cart(128)
+        mapper = CodemastersMapper(cart)
+        # slot 2 default = bank 2, filled with 0x02
+        assert mapper.read_slot2(0x8000) == 0x02
+
+    def test_sram_covers_8000_to_9fff(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8000, 0x80)
+        mapper.write_slot2(0x9FFF, 0xCC)
+        assert mapper.read_slot2(0x9FFF) == 0xCC
+
+    def test_sram_does_not_cover_a000_to_bfff(self):
+        cart = _make_codemasters_cart(128)
+        mapper = CodemastersMapper(cart)
+        mapper.write_slot2(0x8000, 0x82)   # enable SRAM, bank 2
+        # $A000–$BFFF must still read from banked ROM (bank 2 = 0x02)
+        assert mapper.read_slot2(0xA000) == 0x02
+
+    def test_bank_reg_write_does_not_corrupt_sram0(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8000, 0x80)   # enable SRAM
+        mapper.write_slot2(0x8000, 0x00)   # another bank-reg write
+        assert mapper._sram[0] == 0x00     # SRAM[0] untouched
+
+    def test_sram_dirty_flag_set_on_write(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        assert mapper._sram_dirty is False
+        mapper.write_slot2(0x8000, 0x80)
+        mapper.write_slot2(0x8001, 0x01)
+        assert mapper._sram_dirty is True
+
+    def test_sram_dirty_not_set_by_bank_reg_write(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8000, 0x80)
+        assert mapper._sram_dirty is False
+
+    def test_sram_save_and_load_roundtrip(self, tmp_path):
+        cart = _make_codemasters_cart()
+        m1 = CodemastersMapper(cart)
+        m1.write_slot2(0x8000, 0x80)
+        m1.write_slot2(0x8042, 0x77)
+        path = str(tmp_path / "cm.sav")
+        assert m1.save_sav(path) is True
+
+        m2 = CodemastersMapper(cart)
+        assert m2.load_sav(path) is True
+        m2.write_slot2(0x8000, 0x80)
+        assert m2.read_slot2(0x8042) == 0x77
+
+    def test_sram_save_returns_false_when_not_dirty(self, tmp_path):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        assert mapper.save_sav(str(tmp_path / "cm.sav")) is False
+
+    def test_sram_load_returns_false_when_missing(self, tmp_path):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        assert mapper.load_sav(str(tmp_path / "no.sav")) is False
+
+    def test_reset_clears_sram_enable_preserves_data(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8000, 0x80)
+        mapper.write_slot2(0x8005, 0xBE)
+        mapper.reset()
+        assert mapper._sram_enabled is False
+        assert mapper._sram[5] == 0xBE     # data preserved across reset
+
+    def test_sram_state_roundtrip(self):
+        mapper = CodemastersMapper(_make_codemasters_cart())
+        mapper.write_slot2(0x8000, 0x80)
+        mapper.write_slot2(0x8100, 0x55)
+        state = mapper.get_state()
+        mapper2 = CodemastersMapper(_make_codemasters_cart())
+        mapper2.set_state(state)
+        assert mapper2._sram_enabled is True
+        assert mapper2._sram[0x100] == 0x55
+        assert mapper2._sram_dirty is True
+
 
 # ---------------------------------------------------------------------------
 # TestMemoryBusCodemasters
@@ -855,3 +962,15 @@ class TestMemoryBusCodemasters:
         bus.write(0x0000, 3)
         bus.reset()
         assert bus.mapper.slot_banks == (0, 1, 2)
+
+    def test_bus_sram_write_and_read_via_slot2(self):
+        bus = MemoryBus(_make_codemasters_cart())
+        bus.write(0x8000, 0x80)    # enable SRAM, bank 0
+        bus.write(0x8100, 0xDE)
+        assert bus.read(0x8100) == 0xDE
+
+    def test_bus_sram_does_not_leak_into_a000(self):
+        cart = _make_codemasters_cart(128)
+        bus = MemoryBus(cart)
+        bus.write(0x8000, 0x82)    # enable SRAM, slot 2 → bank 2 (all 0x02)
+        assert bus.read(0xA000) == 0x02   # ROM, not SRAM
