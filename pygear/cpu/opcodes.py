@@ -1312,13 +1312,17 @@ def build_all_tables(cpu):
 
     # INI / IND / INIR / INDR
     def _ini_step(inc: bool):
-        val = cpu.ports.read(cpu.C)
+        val    = cpu.ports.read(cpu.C)
         bus.write(cpu.HL, val)
         cpu.HL = (cpu.HL + (1 if inc else -1)) & 0xFFFF
         cpu.B  = (cpu.B - 1) & 0xFF
-        f = cpu.F & C_FLAG
-        if cpu.B == 0: f |= Z_FLAG
-        f |= N_FLAG
+        c_adj  = (cpu.C + (1 if inc else -1)) & 0xFF
+        t      = val + c_adj
+        f      = cpu.B & (S_FLAG | Y_FLAG | X_FLAG)   # S/YF/XF from B after dec
+        if cpu.B == 0:              f |= Z_FLAG
+        if val & 0x80:              f |= N_FLAG
+        if t > 0xFF:                f |= H_FLAG | C_FLAG
+        if _parity((t & 7) ^ cpu.B): f |= PV_FLAG
         cpu.F = f
 
     def op_A2(): _ini_step(True);  return 16   # INI
@@ -1339,13 +1343,16 @@ def build_all_tables(cpu):
 
     # OUTI / OUTD / OTIR / OTDR
     def _outi_step(inc: bool):
-        cpu.B = (cpu.B - 1) & 0xFF
-        val   = bus.read(cpu.HL)
+        cpu.B  = (cpu.B - 1) & 0xFF
+        val    = bus.read(cpu.HL)
         cpu.ports.write(cpu.C, val)
         cpu.HL = (cpu.HL + (1 if inc else -1)) & 0xFFFF
-        f = cpu.F & C_FLAG
-        if cpu.B == 0: f |= Z_FLAG
-        f |= N_FLAG
+        t      = val + (cpu.HL & 0xFF)           # L after HL ±1
+        f      = cpu.B & (S_FLAG | Y_FLAG | X_FLAG)   # S/YF/XF from B after dec
+        if cpu.B == 0:              f |= Z_FLAG
+        if val & 0x80:              f |= N_FLAG
+        if t > 0xFF:                f |= H_FLAG | C_FLAG
+        if _parity((t & 7) ^ cpu.B): f |= PV_FLAG
         cpu.F = f
 
     def op_A3(): _outi_step(True);  return 16   # OUTI

@@ -3483,3 +3483,173 @@ class TestInterrupts:
         cpu.step()                       # INT fires
         assert not cpu.halted
         assert cpu.PC == 0x0038
+
+
+# ---------------------------------------------------------------------------
+# Undocumented XF/YF (bits 3/5 of F) for block I/O instructions
+# ---------------------------------------------------------------------------
+
+class TestBlockIOUndocumentedFlags:
+    """Verify undocumented S/N/H/C/PV/XF/YF flags for INI, IND, OUTI, OUTD."""
+
+    # -----------------------------------------------------------------------
+    # INI (ED A2) — single step
+    # -----------------------------------------------------------------------
+
+    def test_ini_yf_xf_from_b(self):
+        # B decrements from 0x29 → 0x28 (0b00101000): YF=1, XF=1
+        cpu = make_cpu()
+        cpu.B = 0x29; cpu.C = 0x00; cpu.HL = 0xC000
+        cpu.ports.set_port(0x00, 0x00)   # val = 0x00
+        load_prog(cpu, [0xED, 0xA2])     # INI
+        cpu.step()
+        assert cpu.B == 0x28
+        assert flag(cpu, 'Y'), "YF should mirror bit 5 of B after decrement"
+        assert flag(cpu, 'X'), "XF should mirror bit 3 of B after decrement"
+
+    def test_ini_yf_set_xf_clear(self):
+        # B: 0x21 → 0x20 (0b00100000): YF=1, XF=0
+        cpu = make_cpu()
+        cpu.B = 0x21; cpu.C = 0x00; cpu.HL = 0xC000
+        cpu.ports.set_port(0x00, 0x00)
+        load_prog(cpu, [0xED, 0xA2])
+        cpu.step()
+        assert flag(cpu, 'Y')
+        assert not flag(cpu, 'X')
+
+    def test_ini_n_flag_set_when_val_bit7(self):
+        # val = 0x80 → bit 7 set → N = 1
+        cpu = make_cpu()
+        cpu.B = 0x02; cpu.C = 0x00; cpu.HL = 0xC000
+        cpu.ports.set_port(0x00, 0x80)
+        load_prog(cpu, [0xED, 0xA2])
+        cpu.step()
+        assert flag(cpu, 'N')
+
+    def test_ini_n_flag_clear_when_val_bit7_clear(self):
+        cpu = make_cpu()
+        cpu.B = 0x02; cpu.C = 0x00; cpu.HL = 0xC000
+        cpu.ports.set_port(0x00, 0x7F)   # bit 7 clear
+        load_prog(cpu, [0xED, 0xA2])
+        cpu.step()
+        assert not flag(cpu, 'N')
+
+    def test_ini_carry_and_half_set_on_overflow(self):
+        # val=0xFF, C=0x02 → c_adj=3, t=0xFF+3=0x102 > 0xFF → H=C=1
+        cpu = make_cpu()
+        cpu.B = 0x02; cpu.C = 0x02; cpu.HL = 0xC000
+        cpu.ports.set_port(0x02, 0xFF)
+        load_prog(cpu, [0xED, 0xA2])
+        cpu.step()
+        assert flag(cpu, 'H')
+        assert flag(cpu, 'C')
+
+    def test_ini_carry_clear_when_no_overflow(self):
+        cpu = make_cpu()
+        cpu.B = 0x02; cpu.C = 0x00; cpu.HL = 0xC000
+        cpu.ports.set_port(0x00, 0x01)   # t = 1+1 = 2, no overflow
+        load_prog(cpu, [0xED, 0xA2])
+        cpu.step()
+        assert not flag(cpu, 'H')
+        assert not flag(cpu, 'C')
+
+    def test_ini_z_set_when_b_reaches_zero(self):
+        cpu = make_cpu()
+        cpu.B = 0x01; cpu.C = 0x00; cpu.HL = 0xC000
+        cpu.ports.set_port(0x00, 0x00)
+        load_prog(cpu, [0xED, 0xA2])
+        cpu.step()
+        assert cpu.B == 0x00
+        assert flag(cpu, 'Z')
+
+    def test_ini_s_from_b(self):
+        # B: 0x81 → 0x80 (bit 7 set) → S=1
+        cpu = make_cpu()
+        cpu.B = 0x81; cpu.C = 0x00; cpu.HL = 0xC000
+        cpu.ports.set_port(0x00, 0x00)
+        load_prog(cpu, [0xED, 0xA2])
+        cpu.step()
+        assert flag(cpu, 'S')
+
+    # -----------------------------------------------------------------------
+    # IND (ED AA) — uses C-1 in the t calculation
+    # -----------------------------------------------------------------------
+
+    def test_ind_xf_yf_from_b(self):
+        # Same B pattern as INI test; IND decrements HL instead of incrementing
+        cpu = make_cpu()
+        cpu.B = 0x29; cpu.C = 0x00; cpu.HL = 0xC010
+        cpu.ports.set_port(0x00, 0x00)
+        load_prog(cpu, [0xED, 0xAA])     # IND
+        cpu.step()
+        assert cpu.B == 0x28
+        assert cpu.HL == 0xC00F          # decremented
+        assert flag(cpu, 'Y')
+        assert flag(cpu, 'X')
+
+    def test_ind_carry_uses_c_minus_one(self):
+        # IND t = val + ((C-1) & 0xFF); choose C=0 → c_adj=0xFF; val=0x01 → t=0x100 > 0xFF
+        cpu = make_cpu()
+        cpu.B = 0x02; cpu.C = 0x00; cpu.HL = 0xC010
+        cpu.ports.set_port(0x00, 0x01)
+        load_prog(cpu, [0xED, 0xAA])
+        cpu.step()
+        assert flag(cpu, 'C')   # t = 0x01 + 0xFF = 0x100 → carry
+
+    # -----------------------------------------------------------------------
+    # OUTI (ED A3)
+    # -----------------------------------------------------------------------
+
+    def test_outi_yf_xf_from_b(self):
+        # B: 0x29 → 0x28 → YF=1, XF=1
+        cpu = make_cpu()
+        cpu.B = 0x29; cpu.C = 0x20; cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0x00       # val = 0x00
+        load_prog(cpu, [0xED, 0xA3])     # OUTI
+        cpu.step()
+        assert cpu.B == 0x28
+        assert flag(cpu, 'Y')
+        assert flag(cpu, 'X')
+
+    def test_outi_n_flag_from_val_bit7(self):
+        cpu = make_cpu()
+        cpu.B = 0x02; cpu.C = 0x20; cpu.HL = 0xC000
+        cpu.bus.mem[0xC000] = 0x80       # bit 7 set → N=1
+        load_prog(cpu, [0xED, 0xA3])
+        cpu.step()
+        assert flag(cpu, 'N')
+
+    def test_outi_carry_from_val_plus_new_l(self):
+        # After OUTI HL is incremented; L_new is used in t calculation
+        # Set HL = 0xC0FF so after ++ → 0xC100, L_new = 0x00
+        # val = 0xFF → t = 0xFF + 0x00 = 0xFF, no carry
+        cpu = make_cpu()
+        cpu.B = 0x02; cpu.C = 0x20; cpu.HL = 0xC0FF
+        cpu.bus.mem[0xC0FF] = 0xFF
+        load_prog(cpu, [0xED, 0xA3])
+        cpu.step()
+        assert not flag(cpu, 'C')   # 0xFF + 0x00 = 0xFF, no carry
+
+    def test_outi_carry_set_when_overflow(self):
+        # HL = 0xC001, after ++ → 0xC002, L_new = 0x02; val = 0xFF → t=0x101 → carry
+        cpu = make_cpu()
+        cpu.B = 0x02; cpu.C = 0x20; cpu.HL = 0xC001
+        cpu.bus.mem[0xC001] = 0xFF
+        load_prog(cpu, [0xED, 0xA3])
+        cpu.step()
+        assert flag(cpu, 'C')   # 0xFF + 0x02 = 0x101 > 0xFF
+
+    # -----------------------------------------------------------------------
+    # OUTD (ED AB)
+    # -----------------------------------------------------------------------
+
+    def test_outd_xf_yf_from_b(self):
+        cpu = make_cpu()
+        cpu.B = 0x29; cpu.C = 0x30; cpu.HL = 0xC010
+        cpu.bus.mem[0xC010] = 0x00
+        load_prog(cpu, [0xED, 0xAB])     # OUTD
+        cpu.step()
+        assert cpu.B == 0x28
+        assert cpu.HL == 0xC00F          # decremented
+        assert flag(cpu, 'Y')
+        assert flag(cpu, 'X')
