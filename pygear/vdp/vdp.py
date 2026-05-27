@@ -292,6 +292,8 @@ class VDP:
 
         Scroll locks (R0)
         -----------------
+        bit 5  Column-0 blank: leftmost 8 pixels filled with backdrop after
+               compositing (see _end_of_line); not applied inside render_line
         bit 6  H-scroll lock: top 16 lines (line < 16) ignore R8
         bit 7  V-scroll lock: right 8 columns (screen_x >= 248) ignore R9
         """
@@ -444,7 +446,10 @@ class VDP:
             if self.regs[1] & 0x40:  # display enable (R1 bit 6)
                 bg                             = self.render_line(line)
                 sp_cram, sp_has, ov, collision = render_sprite_line(self.vram, self.regs, line)
-                self._line_buffer[line]        = self._compose_line(bg, sp_cram, sp_has)
+                composed                       = self._compose_line(bg, sp_cram, sp_has)
+                if self.regs[0] & 0x20:  # R0 bit 5: left column blank
+                    composed[:8] = 16 + (self.regs[7] & 0x0F)
+                self._line_buffer[line]        = composed
                 if ov:        self.status |= 0x40   # sprite overflow
                 if collision: self.status |= 0x20   # sprite collision
             else:

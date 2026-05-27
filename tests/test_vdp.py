@@ -961,6 +961,91 @@ class TestBackground:
         # Screen x=0, line 0 → bg_y = 0+8 = 8 → tile row 1, col 0 → tile 1 → color 4
         assert vdp.render_line(0)[0][0] == 4
 
+    # -----------------------------------------------------------------------
+    # Left column blank (R0 bit 5)
+    # -----------------------------------------------------------------------
+
+    def _step_line(self, vdp, line_num: int = 0):
+        """Advance the VDP to render exactly one active scanline into _line_buffer."""
+        vdp.step(CYCLES_PER_LINE * (line_num + 1))
+        return vdp._line_buffer[line_num]
+
+    def test_column0_blank_fills_pixels_0_to_7_with_backdrop(self):
+        # R0 bit 5 set: screen_x 0-7 replaced with backdrop CRAM index (16 + R7[3:0])
+        vdp = make_bg_vdp()
+        write_solid_tile(vdp, 1, color=3)
+        write_name_entry(vdp, 0, 0, tile_num=1)  # tile at bg column 0
+        vdp.regs[7] = 0x00  # backdrop = CRAM index 16
+        vdp.regs[0] = 0x20  # left column blank
+        buf = self._step_line(vdp)
+        assert all(buf[i] == 16 for i in range(8))
+
+    def test_column0_blank_does_not_affect_pixels_8_and_beyond(self):
+        # Pixels 8-255 must still render normally.
+        vdp = make_bg_vdp()
+        write_solid_tile(vdp, 1, color=5)
+        write_name_entry(vdp, 0, 0, tile_num=1)
+        write_name_entry(vdp, 0, 1, tile_num=1)  # second tile also color 5
+        vdp.regs[0] = 0x20
+        buf = self._step_line(vdp)
+        # Tile 1 spans x=8-15 and should NOT be blanked
+        assert all(buf[i] == 5 for i in range(8, 16))
+
+    def test_column0_blank_r7_selects_backdrop_cram_index(self):
+        # R7[3:0] = 3 → backdrop CRAM index = 16 + 3 = 19
+        vdp = make_bg_vdp()
+        write_solid_tile(vdp, 1, color=7)
+        write_name_entry(vdp, 0, 0, tile_num=1)
+        vdp.regs[7] = 0x03
+        vdp.regs[0] = 0x20
+        buf = self._step_line(vdp)
+        assert all(buf[i] == 19 for i in range(8))
+
+    def test_column0_blank_boundary_pixel_7_blanked_pixel_8_not(self):
+        vdp = make_bg_vdp()
+        write_solid_tile(vdp, 1, color=2)
+        write_name_entry(vdp, 0, 0, tile_num=1)
+        write_name_entry(vdp, 0, 1, tile_num=1)
+        vdp.regs[7] = 0x00  # backdrop = CRAM 16
+        vdp.regs[0] = 0x20
+        buf = self._step_line(vdp)
+        assert buf[7]  == 16  # last blanked pixel
+        assert buf[8]  == 2   # first un-blanked pixel (tile color)
+
+    def test_column0_blank_inactive_when_bit_clear(self):
+        # R0 bit 5 = 0: column 0 renders normally (tile color, not backdrop)
+        vdp = make_bg_vdp()
+        write_solid_tile(vdp, 1, color=9)
+        write_name_entry(vdp, 0, 0, tile_num=1)
+        vdp.regs[7] = 0x00
+        vdp.regs[0] = 0x00  # no locks
+        buf = self._step_line(vdp)
+        assert all(buf[i] == 9 for i in range(8))
+
+    def test_column0_blank_overrides_tile_with_r7_max(self):
+        # Verify that even with R7[3:0]=0xF the CRAM index is correct (16+15=31)
+        vdp = make_bg_vdp()
+        write_solid_tile(vdp, 1, color=1)
+        write_name_entry(vdp, 0, 0, tile_num=1)
+        vdp.regs[7] = 0x0F  # backdrop = CRAM index 31
+        vdp.regs[0] = 0x20
+        buf = self._step_line(vdp)
+        assert all(buf[i] == 31 for i in range(8))
+
+    def test_column0_blank_applies_to_all_active_lines(self):
+        # The blank should apply on every active scanline, not just line 0.
+        vdp = make_bg_vdp()
+        write_solid_tile(vdp, 1, color=4)
+        for col in range(32):
+            for row in range(28):
+                write_name_entry(vdp, row, col, tile_num=1)
+        vdp.regs[7] = 0x02  # backdrop = CRAM 18
+        vdp.regs[0] = 0x20
+        vdp.step(CYCLES_PER_LINE * ACTIVE_LINES)
+        for line in range(ACTIVE_LINES):
+            assert all(vdp._line_buffer[line][i] == 18 for i in range(8)), \
+                f"line {line} column-0 not blanked"
+
 
 # ---------------------------------------------------------------------------
 # CRAM colour decode helpers
