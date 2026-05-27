@@ -2774,6 +2774,259 @@ class TestIndexed:
 
 
 # ---------------------------------------------------------------------------
+# DDCB/FDCB undocumented result-register writes
+# ---------------------------------------------------------------------------
+
+# Register index → (attr_name, friendly_name)
+_REGS = {0: 'B', 1: 'C', 2: 'D', 3: 'E', 4: 'H', 5: 'L', 7: 'A'}
+
+MEM_BASE = 0xCC00   # arbitrary RAM address used as (IX+d) / (IY+d) target
+
+
+def _setup(cpu, *, ix=None, iy=None, d=0, mem_val=0, prog):
+    """Load IX/IY, place mem_val at the effective address, load prog."""
+    if ix is not None:
+        cpu.IX = ix
+        cpu.bus.mem[ix + d] = mem_val
+    if iy is not None:
+        cpu.IY = iy
+        cpu.bus.mem[iy + d] = mem_val
+    load_prog(cpu, prog)
+
+
+class TestDDCBResultRegister:
+    """DDCB undocumented result written to the register encoded in bits 2:0."""
+
+    # -------------------------------------------------------------------
+    # Shift / rotate — all 7 non-(HL) register targets
+    # -------------------------------------------------------------------
+
+    def test_shift_writes_to_all_non_hl_registers(self):
+        # opcode = (op_idx << 3) | r_idx; use RLC (op_idx=0)
+        # r_idx 6 = canonical (HL) form — no extra register write
+        for r_idx, name in _REGS.items():
+            cpu = make_cpu()
+            cpu.IX = MEM_BASE
+            cpu.bus.mem[MEM_BASE + 1] = 0b00001111   # RLC → 0b00011110
+            opcode = (0 << 3) | r_idx   # RLC, target r_idx
+            load_prog(cpu, [0xDD, 0xCB, 0x01, opcode])
+            cpu.step()
+            assert getattr(cpu, name) == 0b00011110, \
+                f"RLC (IX+1) should write result to {name}"
+
+    def test_shift_canonical_form_r6_no_extra_write(self):
+        # r_idx=6 (the (HL) slot) = canonical form — only memory is written,
+        # H and L must be unchanged.
+        cpu = make_cpu()
+        cpu.IX  = MEM_BASE
+        cpu.H   = 0x11
+        cpu.L   = 0x22
+        cpu.bus.mem[MEM_BASE + 1] = 0x01
+        load_prog(cpu, [0xDD, 0xCB, 0x01, 0x06])   # RLC (IX+1)  r_idx=6
+        cpu.step()
+        assert cpu.H == 0x11   # unchanged
+        assert cpu.L == 0x22   # unchanged
+
+    def test_rlc_result_to_B(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE] = 0b10000001   # RLC → 0b00000011, C=1
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0x00])   # RLC (IX+0) → B
+        cpu.step()
+        assert cpu.bus.mem[MEM_BASE] == 0b00000011
+        assert cpu.B == 0b00000011
+
+    def test_rrc_result_to_C(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE] = 0b00000001   # RRC → 0b10000000, C=1
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0x09])   # RRC (IX+0) → C
+        cpu.step()
+        assert cpu.C == 0b10000000
+
+    def test_rl_result_to_D(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE] = 0b01000000
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0x12])   # RL (IX+0) → D
+        cpu.step()
+        assert cpu.D == 0b10000000
+
+    def test_rr_result_to_E(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE] = 0b10000000
+        set_flags(cpu, C=False)
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0x1B])   # RR (IX+0) → E
+        cpu.step()
+        assert cpu.E == 0b01000000
+
+    def test_sla_result_to_H(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE] = 0b00000011
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0x24])   # SLA (IX+0) → H
+        cpu.step()
+        assert cpu.H == 0b00000110
+
+    def test_srl_result_to_L(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE] = 0b10000000
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0x3D])   # SRL (IX+0) → L
+        cpu.step()
+        assert cpu.L == 0b01000000
+
+    def test_sra_result_to_A(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE] = 0b10000010
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0x2F])   # SRA (IX+0) → A
+        cpu.step()
+        assert cpu.A == 0b11000001
+
+    def test_shift_memory_also_written(self):
+        # Both the memory cell AND the register receive the result.
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE + 2] = 0b00001111
+        load_prog(cpu, [0xDD, 0xCB, 0x02, 0x07])   # RLC (IX+2) → A
+        cpu.step()
+        result = 0b00011110
+        assert cpu.bus.mem[MEM_BASE + 2] == result
+        assert cpu.A == result
+
+    # -------------------------------------------------------------------
+    # RES — all non-(HL) register targets
+    # -------------------------------------------------------------------
+
+    def test_res_writes_to_all_non_hl_registers(self):
+        for r_idx, name in _REGS.items():
+            cpu = make_cpu()
+            cpu.IX = MEM_BASE
+            cpu.bus.mem[MEM_BASE] = 0xFF
+            opcode = 0x80 | (0 << 3) | r_idx   # RES 0, (IX+0) → r
+            load_prog(cpu, [0xDD, 0xCB, 0x00, opcode])
+            cpu.step()
+            assert getattr(cpu, name) == 0xFE, \
+                f"RES 0,(IX) should write result 0xFE to {name}"
+
+    def test_res_bit3_to_B(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE] = 0xFF
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0x98])   # RES 3, (IX+0) → B
+        cpu.step()
+        assert cpu.B == 0xF7
+        assert cpu.bus.mem[MEM_BASE] == 0xF7
+
+    def test_res_canonical_r6_no_extra_write(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.H  = 0xAA
+        cpu.L  = 0xBB
+        cpu.bus.mem[MEM_BASE] = 0xFF
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0x86])   # RES 0, (IX+0)  r_idx=6
+        cpu.step()
+        assert cpu.H == 0xAA
+        assert cpu.L == 0xBB
+
+    # -------------------------------------------------------------------
+    # SET — all non-(HL) register targets
+    # -------------------------------------------------------------------
+
+    def test_set_writes_to_all_non_hl_registers(self):
+        for r_idx, name in _REGS.items():
+            cpu = make_cpu()
+            cpu.IX = MEM_BASE
+            cpu.bus.mem[MEM_BASE] = 0x00
+            opcode = 0xC0 | (0 << 3) | r_idx   # SET 0, (IX+0) → r
+            load_prog(cpu, [0xDD, 0xCB, 0x00, opcode])
+            cpu.step()
+            assert getattr(cpu, name) == 0x01, \
+                f"SET 0,(IX) should write result 0x01 to {name}"
+
+    def test_set_bit5_to_A(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.bus.mem[MEM_BASE] = 0x00
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0xEF])   # SET 5, (IX+0) → A
+        cpu.step()
+        assert cpu.A == 0x20
+        assert cpu.bus.mem[MEM_BASE] == 0x20
+
+    def test_set_canonical_r6_no_extra_write(self):
+        cpu = make_cpu()
+        cpu.IX = MEM_BASE
+        cpu.H  = 0x11
+        cpu.L  = 0x22
+        cpu.bus.mem[MEM_BASE] = 0x00
+        load_prog(cpu, [0xDD, 0xCB, 0x00, 0xC6])   # SET 0, (IX+0)  r_idx=6
+        cpu.step()
+        assert cpu.H == 0x11
+        assert cpu.L == 0x22
+
+    # -------------------------------------------------------------------
+    # BIT — no result written to any register
+    # -------------------------------------------------------------------
+
+    def test_bit_does_not_write_register(self):
+        # BIT tests: result register write must NOT happen even for non-6 codes.
+        for r_idx in range(8):
+            cpu = make_cpu()
+            cpu.IX = MEM_BASE
+            cpu.B = cpu.C = cpu.D = cpu.E = cpu.H = cpu.L = cpu.A = 0x55
+            cpu.bus.mem[MEM_BASE] = 0xFF
+            opcode = 0x40 | (0 << 3) | r_idx   # BIT 0, (IX+0), various r_idx
+            load_prog(cpu, [0xDD, 0xCB, 0x00, opcode])
+            cpu.step()
+            # None of the registers may change due to BIT
+            for name in ('B', 'C', 'D', 'E', 'H', 'L', 'A'):
+                assert getattr(cpu, name) == 0x55, \
+                    f"BIT should not modify {name} (r_idx={r_idx})"
+
+    # -------------------------------------------------------------------
+    # FD CB (IY) — same undocumented behaviour
+    # -------------------------------------------------------------------
+
+    def test_fdcb_shift_writes_register(self):
+        cpu = make_cpu()
+        cpu.IY = MEM_BASE
+        cpu.bus.mem[MEM_BASE + 3] = 0b00000001   # RRC → 0b10000000
+        load_prog(cpu, [0xFD, 0xCB, 0x03, 0x09])   # RRC (IY+3) → C
+        cpu.step()
+        assert cpu.C == 0b10000000
+        assert cpu.bus.mem[MEM_BASE + 3] == 0b10000000
+
+    def test_fdcb_res_writes_register(self):
+        cpu = make_cpu()
+        cpu.IY = MEM_BASE
+        cpu.bus.mem[MEM_BASE + 1] = 0xFF
+        load_prog(cpu, [0xFD, 0xCB, 0x01, 0x9F])   # RES 3, (IY+1) → A
+        cpu.step()
+        assert cpu.A == 0xF7
+
+    def test_fdcb_set_writes_register(self):
+        cpu = make_cpu()
+        cpu.IY = MEM_BASE
+        cpu.bus.mem[MEM_BASE + 2] = 0x00
+        load_prog(cpu, [0xFD, 0xCB, 0x02, 0xCB])   # SET 1, (IY+2) → E? wait
+        # opcode 0xCB = 1100_1011 → SET(bit=1), r_idx=3(E)
+        cpu.step()
+        assert cpu.E == 0x02
+
+    def test_fdcb_bit_no_register_write(self):
+        cpu = make_cpu()
+        cpu.IY  = MEM_BASE
+        cpu.A   = 0x77
+        cpu.bus.mem[MEM_BASE] = 0x00
+        load_prog(cpu, [0xFD, 0xCB, 0x00, 0x47])   # BIT 0, (IY+0), r_idx=7(A)
+        cpu.step()
+        assert cpu.A == 0x77   # A must not be clobbered
+
+
+# ---------------------------------------------------------------------------
 # Task 8 — ED prefix, block instructions, interrupts
 # ---------------------------------------------------------------------------
 

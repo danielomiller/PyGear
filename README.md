@@ -94,6 +94,4 @@ before VDP work is considered stable.
 
 ## Known Limitations
 
-- No BIOS emulation — games that rely on undocumented BIOS side-effects may not work
 - SN76489 envelope accuracy is approximate
-- DDCB/FDCB undocumented result-register write is not yet implemented
