@@ -66,7 +66,7 @@ Noise control byte (reg 6) bit layout:
     00 → period 0x10  (TICK_RATE / 32)
     01 → period 0x20  (TICK_RATE / 64)
     10 → period 0x40  (TICK_RATE / 128)
-    11 → use tone channel 2's period register value
+    11 → clocked by Tone channel 2's counter output (hardware-accurate coupling)
 
 On each LFSR clock:
   output_bit = lfsr & 1
@@ -76,6 +76,16 @@ On each LFSR clock:
 
 Writing to reg 6 resets the LFSR to 0x8000.
 The noise output is ±ATTENUATION[vol[3]] according to lfsr bit 0.
+
+render_cycles()
+---------------
+Call render_cycles(n_cpu_cycles, sample_rate) once per scanline (or any
+other sub-frame quantum) instead of render() once per frame.  It converts
+CPU cycles to the fractional sample count, carries the sub-sample remainder
+into the next call, and delegates to render() for the integer part.  This
+ensures that PSG register changes (volume, frequency) take effect at the
+correct audio sample offset rather than being applied retroactively to the
+whole frame.
 """
 
 import math
@@ -100,6 +110,7 @@ class PSG:
         self._tone_flip     = [False, False, False]
         self._lfsr          = 0x8000
         self._noise_counter = 0.0
+        self._frac          = 0.0  # sub-sample remainder for render_cycles()
 
     # ------------------------------------------------------------------
     def reset(self) -> None:
@@ -112,6 +123,7 @@ class PSG:
         self._tone_flip     = [False, False, False]
         self._lfsr          = 0x8000
         self._noise_counter = 0.0
+        self._frac          = 0.0
 
     def get_state(self) -> dict:
         return {
@@ -124,6 +136,7 @@ class PSG:
             '_tone_flip':     list(self._tone_flip),
             '_lfsr':          self._lfsr,
             '_noise_counter': self._noise_counter,
+            '_frac':          self._frac,
         }
 
     def set_state(self, s: dict) -> None:
@@ -136,6 +149,7 @@ class PSG:
         self._tone_flip     = s['_tone_flip']
         self._lfsr          = s['_lfsr']
         self._noise_counter = s['_noise_counter']
+        self._frac          = s.get('_frac', 0.0)   # graceful for old save states
 
     # ------------------------------------------------------------------
     def set_stereo(self, value: int) -> None:
@@ -187,7 +201,7 @@ class PSG:
                 self._volume[ch] = value & 0x0F
 
     # ------------------------------------------------------------------
-    # Noise period lookup for NF bits 0-2; NF=3 borrows tone channel 2's period.
+    # Noise period lookup for NF bits 0-2; NF=3 borrows tone channel 2's counter.
     _NOISE_PERIODS = (0x10, 0x20, 0x40)
 
     def render(self, n_samples: int, sample_rate: float) -> list:
@@ -203,6 +217,13 @@ class PSG:
         Channel order matches the bit layout: ch0=Tone1, ch1=Tone2, ch2=Tone3,
         ch3=Noise.  Left bit indices: Noise=0, Tone1=1, Tone2=2, Tone3=3.
         Right bit indices: Noise=4, Tone1=5, Tone2=6, Tone3=7.
+
+        NF=3 noise coupling
+        -------------------
+        When NF=3, the noise LFSR is clocked by Tone 2's counter output flip
+        (hardware-accurate).  The LFSR advances exactly as many times per
+        sample as Tone 2's counter crosses zero, matching the physical chip's
+        behaviour where Tone 2's pin directly drives the noise clock input.
         """
         ticks_per_sample = TICK_RATE / sample_rate
         white_noise = bool(self._noise_ctrl & 0x04)
@@ -226,25 +247,36 @@ class PSG:
         noise_periods = self._NOISE_PERIODS
         noise_counter = self._noise_counter
         lfsr          = self._lfsr
-        noise_period  = (tp[2] or 1) if nf == 3 else noise_periods[nf]
+        # noise_period is only used when nf < 3 (NF=3 uses Tone 2's flip)
+        noise_period  = noise_periods[nf] if nf < 3 else 1
 
         out = []
         for _ in range(n_samples):
-            # --- Tone channels ---
+            # --- Tone channels (track ch2 flip count for NF=3 coupling) ---
+            tone2_flips = 0
             for ch in range(3):
                 tc[ch] -= ticks_per_sample
                 period = tp[ch] or 1
                 while tc[ch] <= 0:
                     tc[ch] += period
                     tf[ch] = not tf[ch]
+                    if ch == 2:
+                        tone2_flips += 1
 
             # --- Noise channel ---
-            noise_counter -= ticks_per_sample
-            while noise_counter <= 0:
-                noise_counter += noise_period
-                out_bit  = lfsr & 1
-                feedback = (out_bit ^ ((lfsr >> 3) & 1)) if white_noise else out_bit
-                lfsr = (lfsr >> 1) | (feedback << 15)
+            if nf == 3:
+                # Hardware-accurate: LFSR clocked by Tone 2's counter output
+                for _ in range(tone2_flips):
+                    out_bit  = lfsr & 1
+                    feedback = (out_bit ^ ((lfsr >> 3) & 1)) if white_noise else out_bit
+                    lfsr = (lfsr >> 1) | (feedback << 15)
+            else:
+                noise_counter -= ticks_per_sample
+                while noise_counter <= 0:
+                    noise_counter += noise_period
+                    out_bit  = lfsr & 1
+                    feedback = (out_bit ^ ((lfsr >> 3) & 1)) if white_noise else out_bit
+                    lfsr = (lfsr >> 1) | (feedback << 15)
 
             # --- Mix left and right independently ---
             mix_l = 0.0
@@ -269,3 +301,18 @@ class PSG:
         self._noise_counter = noise_counter
         self._lfsr          = lfsr
         return out
+
+    def render_cycles(self, n_cpu_cycles: int, sample_rate: float) -> list:
+        """Produce audio samples for *n_cpu_cycles* elapsed CPU cycles.
+
+        Converts CPU cycles to a fractional sample count, produces the integer
+        part via render(), and carries the sub-sample remainder into the next
+        call.  Calling this once per scanline (228 cycles) instead of calling
+        render() once per frame ensures PSG register writes (volume, frequency)
+        take effect at the correct audio position rather than being applied
+        retroactively to the whole frame.
+        """
+        self._frac += n_cpu_cycles * sample_rate / PSG_CLOCK
+        n = int(self._frac)
+        self._frac -= n
+        return self.render(n, sample_rate) if n else []

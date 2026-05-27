@@ -94,4 +94,4 @@ before VDP work is considered stable.
 
 ## Known Limitations
 
-- SN76489 envelope accuracy is approximate
+None known.

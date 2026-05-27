@@ -121,17 +121,18 @@ class GameGearConsole:
     def step_frame(self) -> list:
         """Advance one video frame (262 scanlines) and return audio samples.
 
-        The CPU and VDP are stepped together one scanline at a time so that
-        VBlank and line interrupts are delivered between CPU instruction
-        boundaries rather than at the end of the whole frame.
+        The CPU, VDP, and PSG are stepped together one scanline at a time.
+        Advancing the PSG per scanline means PSG register writes (volume,
+        frequency) take effect at the correct audio sample offset rather than
+        being applied retroactively at frame end.
 
         Returns a list of (left, right) float pairs ([-1.0, +1.0] each) at
-        SAMPLE_RATE Hz sized for exactly one 60 Hz frame (~735 samples).
+        SAMPLE_RATE Hz sized for approximately one 60 Hz frame (~735 samples).
         Stereo routing is controlled by the GG stereo register (port 0x06).
         """
+        audio = []
         for _ in range(TOTAL_LINES):
             self.cpu.run_cycles(CYCLES_PER_LINE)
             self.vdp.step(CYCLES_PER_LINE)
-
-        n_samples = round(self.SAMPLE_RATE / 60)
-        return self.psg.render(n_samples, self.SAMPLE_RATE)
+            audio += self.psg.render_cycles(CYCLES_PER_LINE, self.SAMPLE_RATE)
+        return audio

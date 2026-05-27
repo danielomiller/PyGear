@@ -4,6 +4,7 @@ import math
 import pytest
 from pygear.sound.psg import PSG, ATTENUATION, PSG_CLOCK, TICK_RATE
 from pygear.io.ports import IOPorts
+from pygear.vdp.vdp import CYCLES_PER_LINE, TOTAL_LINES
 
 
 # ---------------------------------------------------------------------------
@@ -608,3 +609,202 @@ class TestIOPortsPSG:
         psg = PSG()
         psg.set_stereo(0x1AA)   # masked to 0xAA
         assert psg._stereo == 0xAA
+
+
+# ---------------------------------------------------------------------------
+# TestRenderCycles — per-scanline fractional rendering
+# ---------------------------------------------------------------------------
+
+_SR = 44100   # sample rate used throughout
+
+
+class TestRenderCycles:
+
+    def test_returns_list_of_stereo_pairs(self):
+        p = PSG()
+        out = p.render_cycles(CYCLES_PER_LINE, _SR)
+        assert isinstance(out, list)
+        assert all(isinstance(s, tuple) and len(s) == 2 for s in out)
+
+    def test_small_cycle_count_returns_empty(self):
+        # 1 CPU cycle → far less than one sample; list should be empty
+        p = PSG()
+        out = p.render_cycles(1, _SR)
+        assert out == []
+
+    def test_correct_sample_count_for_one_scanline(self):
+        # 228 cycles → 228 * 44100 / 3579545 ≈ 2.808 → 2 samples, _frac ≈ 0.808
+        p = PSG()
+        out = p.render_cycles(CYCLES_PER_LINE, _SR)
+        assert len(out) == 2
+        assert 0.7 < p._frac < 0.9
+
+    def test_frac_accumulates_across_calls(self):
+        # Each scanline adds ~2.808 samples; after enough calls the total is correct.
+        p = PSG()
+        total = sum(len(p.render_cycles(CYCLES_PER_LINE, _SR))
+                    for _ in range(TOTAL_LINES))
+        expected = CYCLES_PER_LINE * TOTAL_LINES * _SR / PSG_CLOCK
+        assert abs(total - expected) < 1.0   # within ±1 sample of exact
+
+    def test_per_scanline_matches_equivalent_render(self):
+        # Chunking into scanlines must give same output as one render() call.
+        p1 = PSG()
+        _set_tone(p1, 0, 0x100)
+        _set_volume(p1, 0, 0)
+
+        p2 = PSG()
+        _set_tone(p2, 0, 0x100)
+        _set_volume(p2, 0, 0)
+
+        per_scanline = []
+        for _ in range(TOTAL_LINES):
+            per_scanline += p1.render_cycles(CYCLES_PER_LINE, _SR)
+
+        assert per_scanline == p2.render(len(per_scanline), _SR)
+
+    def test_chunked_equals_single_large_call(self):
+        # render_cycles(big) == many render_cycles(small) with same total cycles.
+        total_cycles = CYCLES_PER_LINE * TOTAL_LINES
+
+        p1 = PSG()
+        _set_tone(p1, 0, 0x200)
+        _set_volume(p1, 0, 0)
+        chunked = []
+        for _ in range(TOTAL_LINES):
+            chunked += p1.render_cycles(CYCLES_PER_LINE, _SR)
+
+        p2 = PSG()
+        _set_tone(p2, 0, 0x200)
+        _set_volume(p2, 0, 0)
+        single = p2.render_cycles(total_cycles, _SR)
+
+        assert chunked == single
+
+    def test_frac_preserved_in_state(self):
+        p = PSG()
+        p.render_cycles(CYCLES_PER_LINE, _SR)          # creates non-zero _frac
+        state = p.get_state()
+        assert '_frac' in state
+        assert state['_frac'] == p._frac
+        p2 = PSG()
+        p2.set_state(state)
+        assert p2._frac == p._frac
+
+    def test_set_state_missing_frac_defaults_to_zero(self):
+        # Old save states without '_frac' key must load gracefully.
+        p = PSG()
+        _set_tone(p, 0, 0x100)
+        _set_volume(p, 0, 0)
+        p.render_cycles(CYCLES_PER_LINE, _SR)
+        state = p.get_state()
+        del state['_frac']
+        p2 = PSG()
+        p2.set_state(state)
+        assert p2._frac == 0.0
+
+    def test_reset_clears_frac(self):
+        p = PSG()
+        p.render_cycles(CYCLES_PER_LINE, _SR)
+        assert p._frac != 0.0
+        p.reset()
+        assert p._frac == 0.0
+
+    def test_silent_psg_renders_zeros(self):
+        p = PSG()   # all volumes at 15 (silent)
+        out = p.render_cycles(CYCLES_PER_LINE * 10, _SR)
+        assert all(l == 0.0 and r == 0.0 for l, r in out)
+
+    def test_volume_change_between_scanlines_takes_effect(self):
+        # Render one scanline silently, then enable volume and render another.
+        # The second scanline must have non-zero audio.
+        p = PSG()
+        _set_tone(p, 0, 0x100)
+        _set_volume(p, 0, 15)   # silent
+        silent = p.render_cycles(CYCLES_PER_LINE, _SR)
+
+        _set_volume(p, 0, 0)    # max volume — change between scanlines
+        loud = p.render_cycles(CYCLES_PER_LINE, _SR)
+
+        assert all(l == 0.0 and r == 0.0 for l, r in silent)
+        assert any(l != 0.0 or r != 0.0 for l, r in loud)
+
+
+# ---------------------------------------------------------------------------
+# TestNF3Coupling — hardware-accurate noise-from-tone-2 link
+# ---------------------------------------------------------------------------
+
+class TestNF3Coupling:
+
+    def test_nf3_noise_differs_with_different_tone2_periods(self):
+        # Changing Tone 2's period when NF=3 must change the noise sequence.
+        p_fast = PSG()
+        _set_tone(p_fast, 2, 0x10)
+        p_fast.write(0x80 | (6 << 4) | 3)   # NF=3, periodic
+        _set_volume(p_fast, 3, 0)
+
+        p_slow = PSG()
+        _set_tone(p_slow, 2, 0x40)
+        p_slow.write(0x80 | (6 << 4) | 3)   # NF=3, periodic
+        _set_volume(p_slow, 3, 0)
+
+        assert p_fast.render(500, _SR) != p_slow.render(500, _SR)
+
+    def test_nf3_white_noise_differs_with_different_tone2_periods(self):
+        p_fast = PSG()
+        _set_tone(p_fast, 2, 0x10)
+        p_fast.write(0x80 | (6 << 4) | 0x07)   # NF=3, white noise
+        _set_volume(p_fast, 3, 0)
+
+        p_slow = PSG()
+        _set_tone(p_slow, 2, 0x40)
+        p_slow.write(0x80 | (6 << 4) | 0x07)
+        _set_volume(p_slow, 3, 0)
+
+        assert p_fast.render(500, _SR) != p_slow.render(500, _SR)
+
+    def test_nf3_high_freq_tone2_steps_lfsr_multiple_times_per_sample(self):
+        # period=1 means Tone 2 flips ~5 times per sample (TICK_RATE/44100 ≈ 5.07)
+        p = PSG()
+        _set_tone(p, 2, 1)
+        p.write(0x80 | (6 << 4) | 3)   # NF=3, periodic
+        _set_volume(p, 3, 0)
+        # Must not crash and must advance the LFSR
+        initial_lfsr = p._lfsr
+        p.render(10, _SR)
+        assert p._lfsr != initial_lfsr
+
+    def test_nf3_tone2_silent_does_not_affect_tone_audio(self):
+        # Even when NF=3 couples noise to Tone 2's counter, Tone 2's audio
+        # contribution is still determined by its volume register alone.
+        p = PSG()
+        _set_tone(p, 2, 0x40)
+        p.write(0x80 | (6 << 4) | 3)   # NF=3
+        _set_volume(p, 2, 15)           # Tone 2 silent
+        _set_volume(p, 3, 15)           # Noise silent too
+        # Only channels 0 and 1 can contribute; both are also silent by default.
+        out = p.render(64, _SR)
+        assert all(l == 0.0 and r == 0.0 for l, r in out)
+
+    def test_nf3_stateful_across_calls(self):
+        p1 = PSG()
+        _set_tone(p1, 2, 0x40)
+        p1.write(0x80 | (6 << 4) | 3)
+        _set_volume(p1, 3, 0)
+        a = p1.render(100, _SR)
+        b = p1.render(100, _SR)
+
+        p2 = PSG()
+        _set_tone(p2, 2, 0x40)
+        p2.write(0x80 | (6 << 4) | 3)
+        _set_volume(p2, 3, 0)
+        assert a + b == p2.render(200, _SR)
+
+    def test_nf3_lfsr_advances_when_tone2_period_very_small(self):
+        # Regression: very small period must not hang (inner for-loop, not while).
+        p = PSG()
+        _set_tone(p, 2, 1)
+        p.write(0x80 | (6 << 4) | 3)
+        _set_volume(p, 3, 0)
+        out = p.render(100, _SR)
+        assert len(out) == 100   # completed without hanging
