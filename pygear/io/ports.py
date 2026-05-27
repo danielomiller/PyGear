@@ -28,10 +28,11 @@ _VDP_WRITE = frozenset({0xBE, 0xBF})
 
 
 class IOPorts:
-    def __init__(self, vdp, joypad, psg=None):
+    def __init__(self, vdp, joypad, psg=None, bus=None):
         self._vdp    = vdp
         self._joypad = joypad
         self._psg    = psg
+        self._bus    = bus
 
     def read(self, port: int) -> int:
         port &= 0xFF
@@ -46,7 +47,9 @@ class IOPorts:
     def write(self, port: int, value: int) -> None:
         port  &= 0xFF
         value &= 0xFF
-        if port == 0x06 and self._psg is not None:
+        if port == 0x3E and self._bus is not None:
+            self._bus.set_mem_ctrl(value)
+        elif port == 0x06 and self._psg is not None:
             self._psg.set_stereo(value)
         elif port == 0x7E and self._psg is not None:
             self._psg.write(value)

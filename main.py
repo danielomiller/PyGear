@@ -58,6 +58,11 @@ def main() -> None:
                         help="display scale factor (default: 3)")
     parser.add_argument("--debug", action="store_true",
                         help="start the interactive Z80 debugger instead of the emulator")
+    bios_grp = parser.add_mutually_exclusive_group()
+    bios_grp.add_argument("--bios", metavar="PATH",
+                          help="path to Game Gear BIOS ROM (auto-detected if omitted)")
+    bios_grp.add_argument("--no-bios", action="store_true",
+                          help="disable BIOS ROM even if one is found on disk")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -70,7 +75,8 @@ def main() -> None:
             print(f"ROM not found: {args.rom}", file=sys.stderr)
             sys.exit(1)
         from pygear.debugger import Debugger
-        Debugger(GameGearConsole(cart)).repl()
+        Debugger(GameGearConsole(cart, bios_path=args.bios,
+                                 no_bios=args.no_bios)).repl()
         return
 
     # ------------------------------------------------------------------
@@ -94,7 +100,7 @@ def main() -> None:
         pygame.quit()
         sys.exit(1)
 
-    console   = GameGearConsole(cart)
+    console   = GameGearConsole(cart, bios_path=args.bios, no_bios=args.no_bios)
     audio_ch  = pygame.mixer.Channel(0)
     rom_name  = args.rom.rsplit("/", 1)[-1]
     frame_num = 0
