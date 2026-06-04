@@ -35,9 +35,12 @@ Active display: lines 0–191.  VBlank: lines 192–261.
 
 import numpy as np
 
-from .sprites import render_sprite_line
+from .sprites import parse_sat, render_sprite_line
 
 VRAM_SIZE = 0x4000   # 16 KB
+
+# Cached screen-X index array — shared across all render_line() calls
+_SCREEN_X = np.arange(256, dtype=np.int32)
 CRAM_SIZE = 64       # 32 colours × 2 bytes
 NUM_REGS  = 11       # R0–R10
 
@@ -114,6 +117,9 @@ class VDP:
         self.frame        = None    # assembled 144×160 list of (R,G,B) tuples
         self.frame_ready  = False   # True after each VBlank; caller clears it
 
+        # SAT cache — parsed once at line 0, reused for all active lines
+        self._sat_cache: list | None = None
+
         self._cpu = None        # set by attach_cpu()
 
     # ------------------------------------------------------------------
@@ -138,6 +144,7 @@ class VDP:
         self._line_buffer = [None] * ACTIVE_LINES
         self.frame        = None
         self.frame_ready  = False
+        self._sat_cache   = None
 
     def get_state(self) -> dict:
         return {
@@ -156,6 +163,7 @@ class VDP:
             '_line_buffer': [b.tobytes() if b is not None else None
                              for b in self._line_buffer],
             'frame_ready':  self.frame_ready,
+            # _sat_cache is transient render state; don't persist it
         }
 
     def set_state(self, s: dict) -> None:
@@ -175,7 +183,8 @@ class VDP:
             np.frombuffer(b, dtype=np.uint8).copy() if b is not None else None
             for b in s['_line_buffer']
         ]
-        self.frame_ready = s['frame_ready']
+        self.frame_ready  = s['frame_ready']
+        self._sat_cache   = None   # always start fresh after a state load
         # Rebuild frame from last complete line buffer if available
         if any(b is not None for b in self._line_buffer):
             self._assemble_frame()
@@ -320,8 +329,8 @@ class VDP:
         # Zero-copy view of VRAM as a read-only numpy array
         vram_np = np.frombuffer(self.vram, dtype=np.uint8)
 
-        # Per-pixel screen x coordinates
-        screen_x = np.arange(256, dtype=np.int32)
+        # Per-pixel screen x coordinates (module-level constant, not re-allocated)
+        screen_x = _SCREEN_X
 
         # Apply V-scroll lock: right 8 columns (screen_x >= 248) ignore V-scroll
         if vscroll_lock:
@@ -442,10 +451,19 @@ class VDP:
     def _end_of_line(self) -> None:
         line = self._line
 
+        # Invalidate SAT cache at the start of each new frame so that any VRAM
+        # writes that occurred during the previous VBlank are picked up.
+        if line == 0:
+            self._sat_cache = None
+
         if line < ACTIVE_LINES:
             if self.regs[1] & 0x40:  # display enable (R1 bit 6)
+                # Parse the SAT once per frame and reuse for all active lines.
+                if self._sat_cache is None:
+                    self._sat_cache = parse_sat(self.vram, self.regs)
                 bg                             = self.render_line(line)
-                sp_cram, sp_has, ov, collision = render_sprite_line(self.vram, self.regs, line)
+                sp_cram, sp_has, ov, collision = render_sprite_line(
+                    self.vram, self.regs, line, sat=self._sat_cache)
                 composed                       = self._compose_line(bg, sp_cram, sp_has)
                 if self.regs[0] & 0x20:  # R0 bit 5: left column blank
                     composed[:8] = 16 + (self.regs[7] & 0x0F)

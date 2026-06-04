@@ -43,6 +43,18 @@ _NEEDS_DISP: frozenset = frozenset({
 
 
 class Z80:
+    __slots__ = (
+        'bus', 'ports',
+        'A', 'F', 'B', 'C', 'D', 'E', 'H', 'L',
+        'A_', 'F_', 'B_', 'C_', 'D_', 'E_', 'H_', 'L_',
+        'IX', 'IY', 'SP', 'PC', 'I', 'R',
+        'IFF1', 'IFF2', 'IM', 'halted',
+        '_int_pending', '_nmi_pending', '_ei_delay',
+        '_dd', '_fd', '_idx_addr',
+        'cycles',
+        '_main', '_ed', '_cb', '_ddcb',
+    )
+
     # ------------------------------------------------------------------
     def __init__(self, bus, ports):
         self.bus   = bus

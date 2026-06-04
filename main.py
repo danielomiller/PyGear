@@ -85,7 +85,7 @@ def main() -> None:
     if args.scale < 1:
         parser.error("--scale must be at least 1")
 
-    pygame.mixer.pre_init(44100, -16, 2, 512)
+    pygame.mixer.pre_init(44100, -16, 2, 2048)
     pygame.init()
 
     scale  = args.scale
@@ -104,6 +104,13 @@ def main() -> None:
     audio_ch  = pygame.mixer.Channel(0)
     rom_name  = args.rom.rsplit("/", 1)[-1]
     frame_num = 0
+
+    # Pre-allocate one Sound object and reuse it every frame by writing into
+    # its sample buffer in-place.  Avoids a Python object + numpy copy per frame.
+    _FRAME_SAMPLES = 750
+    _audio_buf = pygame.sndarray.make_sound(
+        np.zeros((_FRAME_SAMPLES, 2), dtype=np.int16)
+    )
 
     running = True
     try:
@@ -144,13 +151,19 @@ def main() -> None:
                 pygame.display.flip()
 
             # --- Audio ---
-            # audio is a list of (left, right) float pairs; shape (n_samples, 2)
-            arr   = np.clip(np.array(audio) * 32767, -32767, 32767).astype(np.int16)
-            sound = pygame.sndarray.make_sound(arr)
+            # Convert float pairs to int16 and write directly into the
+            # pre-allocated Sound buffer (no allocation per frame).
+            arr = np.clip(np.array(audio) * 32767, -32767, 32767).astype(np.int16)
+            n   = min(len(arr), _FRAME_SAMPLES)
+            buf = pygame.sndarray.samples(_audio_buf)
+            buf[:n] = arr[:n]
+            if n < _FRAME_SAMPLES:
+                buf[n:] = 0
+            del buf   # release the lock on the Sound buffer
             if audio_ch.get_busy():
-                audio_ch.queue(sound)   # double-buffer: replace queued frame, never drop
+                audio_ch.queue(_audio_buf)
             else:
-                audio_ch.play(sound)
+                audio_ch.play(_audio_buf)
 
             clock.tick(60)
             frame_num += 1

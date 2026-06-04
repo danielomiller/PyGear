@@ -43,6 +43,9 @@ import numpy as np
 
 SPRITE_LIMIT = 8
 
+# Pre-computed bit-shift positions for vectorised bitplane extraction
+_SHIFTS = np.array([7, 6, 5, 4, 3, 2, 1, 0], dtype=np.uint8)
+
 
 def sat_base(regs: bytearray) -> int:
     """Return the VRAM byte address of the SAT from register R5."""
@@ -72,13 +75,17 @@ def parse_sat(vram: bytearray, regs: bytearray) -> list:
     return result
 
 
-def sprites_on_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
+def sprites_on_line(vram: bytearray, regs: bytearray, line: int,
+                    sat: list | None = None) -> tuple:
     """Return (visible, overflow) for *line*.
 
     *visible* is a list of up to SPRITE_LIMIT (8) tuples
     (x, tile_num, dy) where dy is the zero-based row offset within the
     sprite's effective height (already accounts for zoom).
     *overflow* is True when more than 8 sprites would have matched.
+
+    Pass *sat* (a pre-parsed result from parse_sat()) to avoid re-parsing
+    the SAT on every scanline; the caller is responsible for cache validity.
 
     Height calculation
       base_h = 16 if tall (R1 bit 1) else 8
@@ -89,10 +96,13 @@ def sprites_on_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
     base_h = 16 if tall else 8
     height = base_h * (2 if zoom else 1)
 
+    if sat is None:
+        sat = parse_sat(vram, regs)
+
     visible  = []
     overflow = False
 
-    for y, x, tile_num in parse_sat(vram, regs):
+    for y, x, tile_num in sat:
         dy = (line - (y + 1)) & 0xFF
         if dy >= height:
             continue
@@ -104,7 +114,8 @@ def sprites_on_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
     return visible, overflow
 
 
-def render_sprite_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
+def render_sprite_line(vram: bytearray, regs: bytearray, line: int,
+                       sat: list | None = None) -> tuple:
     """Render all sprites visible on *line*.
 
     Returns (sp_cram, sp_has, overflow, collision).
@@ -136,7 +147,7 @@ def render_sprite_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
     tile_base = (regs[6] & 0x04) << 11
     ec_shift  = -8 if (regs[0] & 0x08) else 0
 
-    visible, overflow = sprites_on_line(vram, regs, line)
+    visible, overflow = sprites_on_line(vram, regs, line, sat=sat)
 
     sp_cram   = np.zeros(256, dtype=np.uint8)
     sp_has    = np.zeros(256, dtype=np.bool_)
@@ -158,29 +169,41 @@ def render_sprite_line(vram: bytearray, regs: bytearray, line: int) -> tuple:
         b2 = vram[(addr + 2) & 0x3FFF]
         b3 = vram[(addr + 3) & 0x3FFF]
 
-        # Decode and plot each of the 8 tile columns
-        for col in range(8):
-            shift = 7 - col
-            color_idx = (
-                 ((b0 >> shift) & 1)
-                | ((b1 >> shift) & 1) << 1
-                | ((b2 >> shift) & 1) << 2
-                | ((b3 >> shift) & 1) << 3
-            )
-            if color_idx == 0:
-                continue          # transparent
+        # Extract all 8 pixel colour indices at once using numpy
+        raw = np.array([b0, b1, b2, b3], dtype=np.uint8)   # (4,)
+        color_idx = (
+            ((raw[0] >> _SHIFTS) & 1)
+            | (((raw[1] >> _SHIFTS) & 1) << 1)
+            | (((raw[2] >> _SHIFTS) & 1) << 2)
+            | (((raw[3] >> _SHIFTS) & 1) << 3)
+        ).astype(np.uint8)                                  # (8,)
 
-            cram_idx = color_idx + 16     # always palette 1
-
-            # Each column covers 1 screen pixel (or 2 with zoom)
-            sx0 = x + ec_shift + col * (2 if zoom else 1)
-            for sx in range(sx0, sx0 + (2 if zoom else 1)):
-                if sx < 0 or sx > 255:
+        if not zoom:
+            sx = x + ec_shift + np.arange(8, dtype=np.int32)   # (8,)
+            plot = (color_idx != 0) & (sx >= 0) & (sx <= 255)
+            sx_p = sx[plot]
+            already = sp_has[sx_p]
+            if already.any():
+                collision = True
+            # Only draw pixels not yet occupied (first sprite wins)
+            free = ~already
+            free_px = sx_p[free]
+            sp_cram[free_px] = color_idx[plot][free] + 16
+            sp_has[free_px]  = True
+        else:
+            # Zoom: each of the 8 source pixels covers 2 screen columns
+            for col in range(8):
+                if color_idx[col] == 0:
                     continue
-                if sp_has[sx]:            # another sprite already drew here
-                    collision = True
-                else:
-                    sp_cram[sx] = cram_idx
-                    sp_has[sx]  = True
+                cram_idx = int(color_idx[col]) + 16
+                sx0 = x + ec_shift + col * 2
+                for sx in range(sx0, sx0 + 2):
+                    if sx < 0 or sx > 255:
+                        continue
+                    if sp_has[sx]:
+                        collision = True
+                    else:
+                        sp_cram[sx] = cram_idx
+                        sp_has[sx]  = True
 
     return sp_cram, sp_has, overflow, collision

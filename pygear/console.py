@@ -130,9 +130,14 @@ class GameGearConsole:
         SAMPLE_RATE Hz sized for approximately one 60 Hz frame (~735 samples).
         Stereo routing is controlled by the GG stereo register (port 0x06).
         """
-        audio = []
+        audio      = []
+        run        = self.cpu.run_cycles
+        vdp_step   = self.vdp.step
+        psg_render = self.psg.render_cycles
+        sr         = self.SAMPLE_RATE
+        extend     = audio.extend
         for _ in range(TOTAL_LINES):
-            self.cpu.run_cycles(CYCLES_PER_LINE)
-            self.vdp.step(CYCLES_PER_LINE)
-            audio += self.psg.render_cycles(CYCLES_PER_LINE, self.SAMPLE_RATE)
+            run(CYCLES_PER_LINE)
+            vdp_step(CYCLES_PER_LINE)
+            extend(psg_render(CYCLES_PER_LINE, sr))
         return audio
