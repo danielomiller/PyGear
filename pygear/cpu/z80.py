@@ -342,3 +342,13 @@ class Z80:
         self._ei_delay    = s['_ei_delay']
         self.cycles       = s['cycles']
         self._dd = self._fd = False
+
+
+# ---------------------------------------------------------------------------
+# Use the Cython-compiled Z80 when available (significant speedup).
+# The pure-Python class above remains as fallback.
+# ---------------------------------------------------------------------------
+try:
+    from .z80_cy import CZ80 as Z80  # noqa: F811
+except ImportError:
+    pass
